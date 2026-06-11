@@ -18,8 +18,12 @@
 //! | [`cwrs`] | `cwrs.c`, §4.3.4.2 | PVQ codeword enumeration (pulse vectors ↔ indices) |
 //! | [`modes`] | `modes.c`, Table 55 | static data of the standard 48 kHz mode |
 //! | [`energy`] | `quant_bands.c`, §4.3.2 | coarse/fine/finalise energy envelope decoding |
+//! | [`rate`] | `rate.c`, §4.3.3 | the bit allocation: quality interpolation, band skipping, fine/shape split |
+//! | [`tables`] | `static_modes_*.h` | mechanically extracted allocation and pulse-cache tables |
 
 pub mod cwrs;
 pub mod energy;
 pub mod laplace;
 pub mod modes;
+pub mod rate;
+pub mod tables;
