@@ -43,7 +43,7 @@ framework.
 | `experimental` | - | pre-conformance frame codec, mode detection, crossover, mid/side (feature `experimental-codec`) |
 | `silk` | §4.2 | planned (conformant decoder) |
 | `celt` | §4.3 | planned (conformant decoder) |
-| `ogg` | RFC 7845 | planned (likely behind a feature flag) |
+| `ogg` | RFC 3533 + RFC 7845 | Ogg pages (CRC, lacing, resync), packet reassembly, `OpusHead`/`OpusTags`, granule/pre-skip/end-trim timing, stream reader + writer |
 
 ## License
 

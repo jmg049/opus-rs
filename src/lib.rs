@@ -11,6 +11,7 @@
 //! |--------|----------|----------|
 //! | [`range`] | §4.1, §5.1 | range decoder + encoder: symbols, binary/ICDF contexts, raw bits, uniform integers, `tell`/`tell_frac` |
 //! | [`packet`] | §3 | TOC byte, frame packing codes 0-3, padding, R1-R7 validation |
+//! | [`ogg`] | RFC 3533 + RFC 7845 | Ogg pages, packet reassembly, `OpusHead`/`OpusTags`, granule/pre-skip timing, stream reader/writer |
 //! | [`lpc`] | analysis groundwork for §4.2/§5.2 | Levinson-Durbin, LP analysis/synthesis filters, pitch estimation, single-tap LTP |
 //! | [`experimental`] | - | the pre-conformance frame codec, mode detection, hybrid crossover, and mid/side helpers ported from `audio_samples` |
 //!
@@ -36,6 +37,7 @@ extern crate alloc;
 pub mod experimental;
 #[cfg(feature = "experimental-codec")]
 pub mod lpc;
+pub mod ogg;
 pub mod packet;
 pub mod range;
 
