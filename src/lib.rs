@@ -1,0 +1,33 @@
+//! A pure-Rust implementation of the Opus audio codec ([RFC 6716]).
+//!
+//! No FFI, no unsafe code, no dependencies. The crate core is `no_std` +
+//! `alloc`; the default `std` feature only adds [`std::error::Error`] impls.
+//!
+//! # Status
+//!
+//! Pre-release. The layers currently implemented, bottom-up:
+//!
+//! | Module | RFC 6716 | Contents |
+//! |--------|----------|----------|
+//! | [`range`] | §4.1, §5.1 | range decoder + encoder: symbols, binary/ICDF contexts, raw bits, uniform integers, `tell`/`tell_frac` |
+//! //!
+//! The SILK (§4.2) and CELT (§4.3) decoders are under construction on top of
+//! these layers.
+//!
+//! # Bit-exactness
+//!
+//! Every arithmetic operation in the entropy coder follows the RFC text
+//! exactly; the encoder is verified against the decoder symbol-for-symbol
+//! (their `rng` states must agree after every operation - see RFC 6716 §5.1).
+//! All multi-byte values, state update rules, and rounding behaviours are
+//! documented at their definition with the RFC section they implement.
+//!
+//! [RFC 6716]: https://www.rfc-editor.org/rfc/rfc6716
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+pub mod range;
+
+pub use range::{RangeDecoder, RangeEncoder, RangeEncoderError};
