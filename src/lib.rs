@@ -10,7 +10,8 @@
 //! | Module | RFC 6716 | Contents |
 //! |--------|----------|----------|
 //! | [`range`] | §4.1, §5.1 | range decoder + encoder: symbols, binary/ICDF contexts, raw bits, uniform integers, `tell`/`tell_frac` |
-//! //!
+//! | [`packet`] | §3 | TOC byte, frame packing codes 0-3, padding, R1-R7 validation |
+//!
 //! The SILK (§4.2) and CELT (§4.3) decoders are under construction on top of
 //! these layers.
 //!
@@ -28,6 +29,8 @@
 
 extern crate alloc;
 
+pub mod packet;
 pub mod range;
 
+pub use packet::{Bandwidth, FrameSize, Mode, Packet, PacketError, Toc};
 pub use range::{RangeDecoder, RangeEncoder, RangeEncoderError};
