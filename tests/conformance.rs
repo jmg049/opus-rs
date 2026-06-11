@@ -88,8 +88,8 @@ fn every_official_vector_packet_parses() {
         assert_eq!(packets.len(), expected_count, "{name}: packet count");
 
         for (i, pkt) in packets.iter().enumerate() {
-            let parsed = Packet::parse(&pkt.data)
-                .unwrap_or_else(|e| panic!("{name} packet {i}: rejected valid packet: {e}"));
+            let parsed =
+                Packet::parse(&pkt.data).unwrap_or_else(|e| panic!("{name} packet {i}: rejected valid packet: {e}"));
             // Frame data must be non-empty for these vectors (no DTX), and
             // mode/bandwidth/frame-size must be resolvable for every config.
             assert!(!parsed.frames().is_empty(), "{name} packet {i}: no frames");
@@ -111,8 +111,7 @@ fn toc_durations_sum_to_reference_pcm_length() {
             .iter()
             .map(|pkt| {
                 let parsed = Packet::parse(&pkt.data).expect("valid");
-                parsed.frames().len() as u64
-                    * parsed.toc().frame_size().samples_per_channel_48k() as u64
+                parsed.frames().len() as u64 * parsed.toc().frame_size().samples_per_channel_48k() as u64
             })
             .sum();
 
@@ -144,6 +143,9 @@ fn vector_suite_exercises_every_configuration_class() {
             }] = true;
         }
     }
-    assert_eq!(configs_seen, [true; 32], "all 32 TOC configurations appear in the suite");
+    assert_eq!(
+        configs_seen, [true; 32],
+        "all 32 TOC configurations appear in the suite"
+    );
     assert_eq!(modes, [true; 3], "all three modes appear in the suite");
 }

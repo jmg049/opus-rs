@@ -33,6 +33,7 @@
 
 extern crate alloc;
 
+pub mod celt;
 #[cfg(feature = "experimental-codec")]
 pub mod experimental;
 #[cfg(feature = "experimental-codec")]
