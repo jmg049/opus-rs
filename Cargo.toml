@@ -1,0 +1,39 @@
+[package]
+name = "opus_native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+description = "A pure-Rust implementation of the Opus audio codec (RFC 6716). No FFI, no unsafe code, no dependencies."
+repository = "https://github.com/jmg049/opus_native"
+documentation = "https://docs.rs/opus_native"
+keywords = ["opus", "audio", "codec", "decoder", "rfc6716"]
+categories = ["multimedia::audio", "multimedia::encoding", "no-std"]
+exclude = ["/tests/vectors/*", "/target/*"]
+
+[features]
+default = ["std"]
+# Implements std::error::Error and enables heap-allocating conveniences.
+# The crate core is no_std + alloc.
+std = []
+
+[dependencies]
+# Intentionally empty. The codec core has zero runtime dependencies.
+
+[dev-dependencies]
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_panics_doc = "warn"
+missing_errors_doc = "warn"
+must_use_candidate = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
