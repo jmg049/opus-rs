@@ -14,7 +14,7 @@ categories = ["multimedia::audio", "multimedia::encoding", "no-std"]
 exclude = ["/tests/vectors/*", "/target/*"]
 
 [features]
-default = ["std", "experimental-codec"]
+default = ["std", "experimental-codec", "spectrograms"]
 # Implements std::error::Error and enables heap-allocating conveniences.
 # The crate core is no_std + alloc.
 std = []
@@ -24,9 +24,11 @@ std = []
 # float math.
 experimental-codec = ["std"]
 # Accelerated FFT backend for the CELT MDCT seam, provided by the
-# `spectrograms` crate (rustfft-based plans). The default build keeps the
-# dependency-free O(n²) evaluation; decoded audio differs only in float
-# rounding (the conformance criterion is PCM quality, not bit-exact PCM).
+# `spectrograms` crate (rustfft-based plans) - ~10× faster decode, on by
+# default: the codec targets near-real-time use. Disable for a zero-
+# dependency build with the built-in O(n²) evaluation; decoded audio differs
+# only in float rounding (the conformance criterion is PCM quality, not
+# bit-exact PCM).
 spectrograms = ["std", "dep:spectrograms"]
 
 [dependencies]
@@ -34,6 +36,10 @@ spectrograms = ["std", "dep:spectrograms"]
 spectrograms = { version = "1.4", path = "../../rust/spectrograms", optional = true, default-features = false, features = ["realfft"] }
 
 [dev-dependencies]
+
+[[example]]
+name = "decode_throughput"
+required-features = ["std"]
 
 [lints.rust]
 missing_docs = "warn"

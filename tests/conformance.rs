@@ -27,6 +27,7 @@ struct DemoPacket {
     data: Vec<u8>,
     /// The encoder's final range-coder `rng` value; a conformant decoder's
     /// range decoder finishes each packet with this exact value.
+    #[cfg_attr(not(feature = "std"), allow(dead_code, reason = "the CELT decode test needs std"))]
     final_range: u32,
 }
 
@@ -150,6 +151,7 @@ fn vector_suite_exercises_every_configuration_class() {
 }
 
 /// The CELT end band per Opus bandwidth (`opus_decoder.c` endband mapping).
+#[cfg(feature = "std")]
 fn celt_end_band(bw: opus_native::Bandwidth) -> usize {
     use opus_native::Bandwidth;
     match bw {
@@ -172,6 +174,7 @@ fn celt_end_band(bw: opus_native::Bandwidth) -> usize {
 ///    build like ours, so the SNR demanded here is far above the official
 ///    `opus_compare` bar; FFT and float-ordering differences are all that
 ///    remain.
+#[cfg(feature = "std")]
 #[test]
 fn celt_only_vectors_final_range_is_bit_exact_and_pcm_matches() {
     use opus_native::RangeDecoder;

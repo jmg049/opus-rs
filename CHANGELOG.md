@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING:** the `spectrograms` FFT backend is now a default feature - the default build decodes at ~410-730× realtime (one core) vs ~10× with the built-in evaluation; use `default-features = false` for the zero-dependency build
+
 ### Added
+- `decode_throughput` example measuring decode speed (× realtime) over an `opus_demo` bitstream
 - SILK decoder groundwork (§4.2): module scaffold and all 69 static tables extracted mechanically from the reference sources, with cross-file spot pins
 - Optional `spectrograms` feature: routes the MDCT's inner FFT through the `spectrograms` crate's planned transforms (~10× faster decode of the conformance vectors); the default build stays dependency-free with the built-in evaluation
 - Conformance: CELT-only vectors are also scored against the reference PCM decode (`.dec`), validating the synthesis chain end to end - testvector01/07/11 land at 96/83/104 dB SNR against the reference float build

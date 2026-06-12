@@ -15,10 +15,11 @@
 //! complex FFT, and a post-rotation - the rotations and windowing are
 //! codec-specific and live here; the FFT is generic. It is isolated behind
 //! [`fft_forward`]/[`fft_inverse`] so a fast backend can replace the built-in
-//! O(n²) evaluation without touching codec logic. The optional
-//! `spectrograms` feature does exactly that, routing through the
-//! `spectrograms` crate's planned FFTs (this project's existing fast
-//! MDCT/FFT work); the default build stays dependency-free.
+//! O(n²) evaluation without touching codec logic. The `spectrograms`
+//! feature (default-on: decode speed is the point of a real-time codec)
+//! does exactly that, routing through the `spectrograms` crate's planned
+//! FFTs (this project's existing fast MDCT/FFT work); disabling it leaves
+//! a dependency-free build.
 //!
 //! Conformance note: the official test vectors compare PCM with a quality
 //! threshold (`opus_compare`), not bit-exactly, so the FFT backend may vary;

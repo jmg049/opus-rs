@@ -32,11 +32,13 @@ framework.
 - **`forbid(unsafe_code)`**: enforced at the crate level.
 - **`no_std` + `alloc`**: the `std` feature (on by default) only adds
   `std::error::Error` impls and conveniences.
-- **Zero dependencies**: nothing in the dependency tree but this crate. The
-  MDCT's inner FFT sits behind a seam: the optional `spectrograms` feature
-  routes it through the [`spectrograms`](https://crates.io/crates/spectrograms)
-  crate's planned FFTs (~10× faster decode), keeping the default build
-  dependency-free.
+- **Fast by default, zero-dep by choice**: the codec targets near-real-time
+  streaming, so the default build routes the MDCT's inner FFT through the
+  [`spectrograms`](https://crates.io/crates/spectrograms) crate's planned
+  FFTs (~10× faster decode). The FFT sits behind a seam: disabling the
+  `spectrograms` feature leaves a dependency-free build (the built-in
+  evaluation) for embedded/wasm-minimal targets. Everything else in the
+  crate is dependency-free either way.
 
 ## Layout
 
@@ -49,6 +51,19 @@ framework.
 | `celt` | §4.3 | complete decoder: bit-exact on every CELT-only official vector (final-range oracle), 83-104 dB SNR against the reference PCM |
 | `silk` | §4.2 | planned (conformant decoder) |
 | `ogg` | RFC 3533 + RFC 7845 | Ogg pages (CRC, lacing, resync), packet reassembly, `OpusHead`/`OpusTags`, granule/pre-skip/end-trim timing, stream reader + writer |
+
+## Performance
+
+The default build decodes far beyond realtime (one core, release build,
+official conformance vectors):
+
+| Stream | `spectrograms` FFT (default) | built-in FFT (zero-dep) |
+|--------|------------------------------|-------------------------|
+| testvector01 (CELT stereo SWB/FB) | ~410× realtime | ~10× realtime |
+| testvector07 (CELT stereo, all bandwidths) | ~730× realtime | - |
+
+Reproduce with
+`cargo run --release --example decode_throughput tests/vectors/testvector01.bit`.
 
 ## Conformance
 
