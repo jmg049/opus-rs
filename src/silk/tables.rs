@@ -357,7 +357,9 @@ pub(crate) const TYPE_OFFSET_NO_VAD_ICDF: [u8; 2] = [230, 0];
 pub(crate) const NLSF_INTERPOLATION_FACTOR_ICDF: [u8; 5] = [243, 221, 192, 181, 0];
 
 /// `silk_Quantization_Offsets_Q10`
-pub(crate) const QUANTIZATION_OFFSETS_Q10: [[i16; 2]; 2] = [[10, 10], [10, 10]];
+// NOTE: the C body uses the OFFSET_*_Q10 macros from define.h; values
+// resolved manually (the script extracts numeric literals only).
+pub(crate) const QUANTIZATION_OFFSETS_Q10: [[i16; 2]; 2] = [[100, 240], [32, 100]];
 
 /// `silk_LTPScales_table_Q14`
 pub(crate) const LTPSCALES_TABLE_Q14: [i16; 3] = [15565, 12288, 8192];

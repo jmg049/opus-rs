@@ -151,3 +151,24 @@ pub(crate) fn lpc_inverse_pred_gain(a_q12: &[i16]) -> i32 {
     }
     lpc_inverse_pred_gain_qa(&mut a_qa[..a_q12.len()])
 }
+
+/// `silk_LPC_analysis_filter`: MA whitening filter (Q12 taps); the first
+/// `order` outputs are zeroed. Wrap-around in the accumulator is allowed -
+/// only invalid streams can trigger it, and two wraps cancel.
+pub(crate) fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i16]) {
+    use super::math::{rshift_round, smlabb};
+    let d = b.len();
+    debug_assert!(d >= 6 && d & 1 == 0 && d <= input.len());
+    debug_assert_eq!(out.len(), input.len());
+    for ix in d..input.len() {
+        let mut out32_q12 = 0i32;
+        for (j, &tap) in b.iter().enumerate() {
+            out32_q12 = smlabb(out32_q12, i32::from(input[ix - 1 - j]), i32::from(tap));
+        }
+        // Subtract the prediction from the input (wrapping), scale to Q0.
+        let out32_q12 = (i32::from(input[ix]) << 12).wrapping_sub(out32_q12);
+        let out32 = rshift_round(out32_q12, 12);
+        out[ix] = out32.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    }
+    out[..d].fill(0);
+}
