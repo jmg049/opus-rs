@@ -1224,6 +1224,175 @@ pub(crate) mod encode {
     use super::super::vq::{Spread, alg_quant, stereo_itheta};
     use super::{QTHETA_OFFSET, bitexact_cos, bitexact_log2tan, compute_qn, frac_mul16};
 
+    /// `stereo_split`: L/R → normalised mid/side in place.
+    fn stereo_split(x: &mut [f32], y: &mut [f32]) {
+        const C: f32 = core::f32::consts::FRAC_1_SQRT_2;
+        for (xv, yv) in x.iter_mut().zip(y.iter_mut()) {
+            let l = C * *xv;
+            let r = C * *yv;
+            *xv = l + r;
+            *yv = r - l;
+        }
+    }
+
+    /// `intensity_stereo`: collapses the pair onto an energy-weighted mid.
+    fn intensity_stereo(x: &mut [f32], y: &[f32], band_e: &[[f32; NB_EBANDS]; 2], i: usize) {
+        let left = band_e[0][i];
+        let right = band_e[1][i];
+        let norm = 1e-15 + (1e-15 + left * left + right * right).sqrt();
+        let a1 = left / norm;
+        let a2 = right / norm;
+        for (xv, &yv) in x.iter_mut().zip(y.iter()) {
+            *xv = a1 * *xv + a2 * yv;
+        }
+    }
+
+    /// `compute_theta`, encoder direction, stereo: measures, quantises and
+    /// codes the mid/side angle, transforming `x`/`y` into mid/side (or an
+    /// intensity mid). Returns `(itheta_q14, inv, delta, qalloc)`.
+    #[allow(clippy::too_many_arguments, reason = "mirrors the reference")]
+    fn compute_theta_stereo_enc(
+        enc: &mut RangeEncoder,
+        x: &mut [f32],
+        y: &mut [f32],
+        i: usize,
+        b: &mut i32,
+        lm: i32,
+        intensity: usize,
+        remaining_bits: i32,
+        band_e: &[[f32; NB_EBANDS]; 2],
+    ) -> (i32, bool, i32, i32) {
+        let n = x.len();
+        let pulse_cap = i32::from(LOG_N[i]) + lm * (1 << BITRES);
+        let offset = (pulse_cap >> 1)
+            - if n == 2 {
+                super::QTHETA_OFFSET_TWOPHASE
+            } else {
+                super::QTHETA_OFFSET
+            };
+        let mut qn = compute_qn(n, *b, offset, pulse_cap, true);
+        if i >= intensity {
+            qn = 1;
+        }
+        let mut itheta = stereo_itheta(x, y, true);
+        let tell = enc.tell_frac() as i32;
+        let mut inv = false;
+        if qn != 1 {
+            itheta = (itheta * qn + 8192) >> 14;
+            if n > 2 {
+                // Step PDF: probability p0 below the midpoint, 1 above.
+                let p0 = 3i32;
+                let x0 = qn >> 1;
+                let ft = (p0 * (x0 + 1) + x0) as u32;
+                let xq = itheta;
+                let (fl, fh) = if xq <= x0 {
+                    ((p0 * xq) as u32, (p0 * (xq + 1)) as u32)
+                } else {
+                    (
+                        ((xq - 1 - x0) + (x0 + 1) * p0) as u32,
+                        ((xq - x0) + (x0 + 1) * p0) as u32,
+                    )
+                };
+                enc.encode(fl, fh, ft);
+            } else {
+                enc.encode_uint(itheta as u32, qn as u32 + 1);
+            }
+            itheta = itheta * 16384 / qn;
+            if itheta == 0 {
+                intensity_stereo(x, y, band_e, i);
+            } else {
+                stereo_split(x, y);
+            }
+        } else {
+            // Intensity stereo: only an inversion flag survives.
+            inv = itheta > 8192;
+            if inv {
+                for v in y.iter_mut() {
+                    *v = -*v;
+                }
+            }
+            intensity_stereo(x, y, band_e, i);
+            if *b > 2 << BITRES && remaining_bits > 2 << BITRES {
+                enc.encode_bit_logp(inv, 2);
+            } else {
+                inv = false;
+            }
+            itheta = 0;
+        }
+        let qalloc = enc.tell_frac() as i32 - tell;
+        *b -= qalloc;
+
+        let delta = if itheta == 0 {
+            -16384
+        } else if itheta == 16384 {
+            16384
+        } else {
+            frac_mul16(
+                (n as i32 - 1) << 7,
+                bitexact_log2tan(
+                    i32::from(bitexact_cos((16384 - itheta) as i16)),
+                    i32::from(bitexact_cos(itheta as i16)),
+                ),
+            )
+        };
+        (itheta, inv, delta, qalloc)
+    }
+
+    /// `quant_band_stereo`, encoder direction (long blocks, no RDO).
+    #[allow(clippy::too_many_arguments, reason = "mirrors the reference")]
+    fn quant_band_stereo_enc(
+        enc: &mut RangeEncoder,
+        x: &mut [f32],
+        y: &mut [f32],
+        mut b: i32,
+        i: usize,
+        lm: i32,
+        spread: Spread,
+        intensity: usize,
+        remaining_bits: &mut i32,
+        band_e: &[[f32; NB_EBANDS]; 2],
+    ) {
+        let n = x.len();
+        let (itheta, _inv, delta, qalloc) =
+            compute_theta_stereo_enc(enc, x, y, i, &mut b, lm, intensity, *remaining_bits, band_e);
+
+        if n == 2 {
+            // Two-sample stereo: the side needs only a sign.
+            let sbits = if itheta != 0 && itheta != 16384 { 1 << BITRES } else { 0 };
+            let mbits = b - sbits;
+            let c = itheta > 8192;
+            *remaining_bits -= qalloc + sbits;
+            let (x2, y2): (&mut [f32], &[f32]) = if c { (y, x) } else { (x, y) };
+            if sbits != 0 {
+                let sign = x2[0] * y2[1] - x2[1] * y2[0] < 0.0;
+                enc.encode_raw_bits(u32::from(sign), 1);
+            }
+            quant_partition_enc(enc, x2, mbits, i, lm, spread, remaining_bits);
+        } else {
+            let mbits = 0.max(b.min((b - delta) / 2));
+            let sbits = b - mbits;
+            *remaining_bits -= qalloc;
+            let rebalance = *remaining_bits;
+            if mbits >= sbits {
+                quant_partition_enc(enc, x, mbits, i, lm, spread, remaining_bits);
+                let rebalance = mbits - (rebalance - *remaining_bits);
+                let mut sbits = sbits;
+                if rebalance > 3 << BITRES && itheta != 0 {
+                    sbits += rebalance - (3 << BITRES);
+                }
+                quant_partition_enc(enc, y, sbits, i, lm, spread, remaining_bits);
+            } else {
+                quant_partition_enc(enc, y, sbits, i, lm, spread, remaining_bits);
+                let rebalance = sbits - (rebalance - *remaining_bits);
+                let mut mbits = mbits;
+                if rebalance > 3 << BITRES && itheta != 16384 {
+                    mbits += rebalance - (3 << BITRES);
+                }
+                quant_partition_enc(enc, x, mbits, i, lm, spread, remaining_bits);
+            }
+        }
+    }
+
     /// `compute_theta`, encoder direction (mono): measures the angle
     /// between the halves, quantises, entropy-codes it, and returns
     /// `(itheta_q14, delta, qalloc)`.
@@ -1336,21 +1505,41 @@ pub(crate) mod encode {
         }
     }
 
-    /// `quant_all_bands`, encoder direction (mono, long blocks).
+    /// Single-sample band, encoder direction (`quant_band_n1`): one sign
+    /// bit per channel.
+    fn quant_band_n1_enc(enc: &mut RangeEncoder, x: &[f32], y: Option<&[f32]>, remaining_bits: &mut i32) {
+        let mut encode_one = |v: f32| {
+            if *remaining_bits >= 1 << BITRES {
+                enc.encode_raw_bits(u32::from(v < 0.0), 1);
+                *remaining_bits -= 1 << BITRES;
+            }
+        };
+        encode_one(x[0]);
+        if let Some(y) = y {
+            encode_one(y[0]);
+        }
+    }
+
+    /// `quant_all_bands`, encoder direction (long blocks; mono or stereo).
     #[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
     pub(crate) fn quant_all_bands_enc(
         enc: &mut RangeEncoder,
         start: usize,
         end: usize,
         x: &mut [f32],
+        mut y: Option<&mut [f32]>,
         shape_bits: &[i32; NB_EBANDS],
         spread: Spread,
+        dual_stereo: bool,
+        intensity: usize,
         total_bits: i32,
         mut balance: i32,
         lm: usize,
         coded_bands: usize,
+        band_e: &[[f32; NB_EBANDS]; 2],
     ) {
         let m = 1usize << lm;
+        let mut dual_stereo = dual_stereo;
         for i in start..end {
             let tell = enc.tell_frac() as i32;
             if i != start {
@@ -1363,8 +1552,41 @@ pub(crate) mod encode {
             } else {
                 0
             };
-            let band = &mut x[m * EBANDS[i] as usize..m * EBANDS[i + 1] as usize];
-            quant_partition_enc(enc, band, b, i, lm as i32, spread, &mut remaining_bits);
+            if dual_stereo && i == intensity {
+                // Switch off dual stereo to do intensity (the decoder also
+                // merges its folding history here; the encoder keeps none).
+                dual_stereo = false;
+            }
+            let band_start = m * EBANDS[i] as usize;
+            let band_end = m * EBANDS[i + 1] as usize;
+            let n = band_end - band_start;
+            let xb = &mut x[band_start..band_end];
+            if let Some(yall) = y.as_mut() {
+                let yb = &mut yall[band_start..band_end];
+                if n == 1 {
+                    quant_band_n1_enc(enc, xb, Some(yb), &mut remaining_bits);
+                } else if dual_stereo {
+                    quant_partition_enc(enc, xb, b / 2, i, lm as i32, spread, &mut remaining_bits);
+                    quant_partition_enc(enc, yb, b / 2, i, lm as i32, spread, &mut remaining_bits);
+                } else {
+                    quant_band_stereo_enc(
+                        enc,
+                        xb,
+                        yb,
+                        b,
+                        i,
+                        lm as i32,
+                        spread,
+                        intensity,
+                        &mut remaining_bits,
+                        band_e,
+                    );
+                }
+            } else if n == 1 {
+                quant_band_n1_enc(enc, xb, None, &mut remaining_bits);
+            } else {
+                quant_partition_enc(enc, xb, b, i, lm as i32, spread, &mut remaining_bits);
+            }
             balance += shape_bits[i] + tell;
         }
     }

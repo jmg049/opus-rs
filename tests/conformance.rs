@@ -675,3 +675,54 @@ fn celt_encoder_round_trips_through_the_decoder() {
     let snr = 10.0 * (sig / noise.max(1e-30)).log10();
     assert!(snr > 20.0, "round-trip SNR {snr:.1} dB");
 }
+
+/// The stereo CELT encoder round trip: decorrelated channels through the
+/// mid/side machinery, with the same range-state oracle (libopus's
+/// opus_demo also accepted this encoder's stereo streams with zero
+/// mismatches when cross-checked).
+#[cfg(feature = "std")]
+#[test]
+fn celt_stereo_encoder_round_trips_through_the_decoder() {
+    use opus_native::OpusDecoder;
+    use opus_native::celt::encoder::CeltEncoder;
+
+    let mut enc = CeltEncoder::with_channels(2);
+    let mut dec = OpusDecoder::new(2);
+    let mut input = Vec::new();
+    let mut output = Vec::new();
+    for f in 0..50 {
+        let mut pcm = Vec::with_capacity(960 * 2);
+        for i in 0..960 {
+            let t = (f * 960 + i) as f32 / 48_000.0;
+            pcm.push(
+                0.5 * (2.0 * core::f32::consts::PI * 440.0 * t).sin()
+                    + 0.2 * (2.0 * core::f32::consts::PI * 1800.0 * t).sin(),
+            );
+            pcm.push(
+                0.4 * (2.0 * core::f32::consts::PI * 660.0 * t).sin()
+                    + 0.2 * (2.0 * core::f32::consts::PI * 2500.0 * t + 0.7).sin(),
+            );
+        }
+        input.extend_from_slice(&pcm);
+        let payload = enc.encode_frame(&pcm, 159);
+        // TOC: config 31 (CELT-only fullband 20 ms), stereo, code 0.
+        let mut packet = vec![0xFCu8];
+        packet.extend_from_slice(&payload);
+        output.extend(dec.decode_packet(&packet).expect("valid packet"));
+        assert_eq!(
+            dec.final_range(),
+            enc.final_range(),
+            "frame {f}: encoder/decoder range states diverged"
+        );
+    }
+    // One MDCT window of algorithmic delay (interleaved: 2 * 120).
+    let (mut sig, mut noise) = (0.0f64, 0.0f64);
+    for i in 9_600..input.len() - 240 {
+        let a = f64::from(input[i]);
+        let b = f64::from(output[i + 240]);
+        sig += a * a;
+        noise += (a - b) * (a - b);
+    }
+    let snr = 10.0 * (sig / noise.max(1e-30)).log10();
+    assert!(snr > 10.0, "stereo round-trip SNR {snr:.1} dB");
+}

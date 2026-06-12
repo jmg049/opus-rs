@@ -450,7 +450,7 @@ fn interp_bits2pulses(ec: &mut AllocEc, p: InterpParams) -> Allocation {
         match ec {
             AllocEc::Dec(d) => start + d.decode_uint((coded_bands + 1 - start) as u32).unwrap_or(0) as usize,
             AllocEc::Enc { enc, intensity, .. } => {
-                let chosen = (*intensity).clamp(start, coded_bands + 1);
+                let chosen = (*intensity).clamp(start, coded_bands);
                 enc.encode_uint((chosen - start) as u32, (coded_bands + 1 - start) as u32);
                 chosen
             },
