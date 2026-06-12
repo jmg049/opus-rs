@@ -320,3 +320,49 @@ fn silk_only_vectors_final_range_is_bit_exact_and_pcm_matches() {
         assert!(snr_db > 40.0, "{name}: PCM SNR {snr_db:.1} dB vs reference decode");
     }
 }
+
+/// Decodes every packet of all twelve vectors through the Opus-level
+/// decoder (TOC dispatch, SILK, CELT, hybrid, redundancy) and checks the
+/// final-range oracle per packet plus PCM quality per vector.
+///
+/// Mode-transition concealment is not yet ported (fades come from
+/// silence), so vectors with mode switches allow a lower SNR; the entropy
+/// stream is unaffected and final ranges must match exactly everywhere.
+#[cfg(feature = "std")]
+#[test]
+fn all_vectors_decode_through_the_opus_decoder() {
+    use opus_native::OpusDecoder;
+
+    let Some(dir) = vectors_dir() else { return };
+
+    for (name, _) in VECTORS {
+        let bits = std::fs::read(dir.join(format!("{name}.bit"))).expect("read .bit");
+        let packets = parse_bit_file(&bits);
+        let reference = std::fs::read(dir.join(format!("{name}.dec"))).expect("read .dec");
+
+        let mut decoder = OpusDecoder::new(2);
+        let mut pcm: Vec<i16> = Vec::new();
+        for (pi, pkt) in packets.iter().enumerate() {
+            pcm.extend(decoder.decode_packet_i16(&pkt.data).expect("valid packet"));
+            assert_eq!(
+                decoder.final_range(),
+                pkt.final_range,
+                "{name} packet {pi}: final range mismatch"
+            );
+        }
+
+        assert_eq!(pcm.len(), reference.len() / 2, "{name}: PCM length");
+        let mut signal = 0.0f64;
+        let mut noise = 0.0f64;
+        for (ours, theirs) in pcm.iter().zip(reference.chunks_exact(2)) {
+            let theirs = i16::from_le_bytes([theirs[0], theirs[1]]);
+            signal += f64::from(theirs) * f64::from(theirs);
+            noise += f64::from(ours - theirs) * f64::from(ours - theirs);
+        }
+        let snr_db = 10.0 * (signal / noise.max(f64::MIN_POSITIVE)).log10();
+        eprintln!("{name}: {} packets, PCM SNR {snr_db:.1} dB", packets.len());
+        // Far above the official opus_compare bar; measured floor is
+        // ~82.5 dB (testvector09).
+        assert!(snr_db > 75.0, "{name}: PCM SNR {snr_db:.1} dB vs reference decode");
+    }
+}

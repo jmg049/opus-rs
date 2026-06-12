@@ -805,10 +805,21 @@ pub fn quant_all_bands(
             0
         };
 
-        if band_start as i64 - n as i64 >= (m * EBANDS[start] as usize) as i64
+        if (band_start as i64 - n as i64 >= (m * EBANDS[start] as usize) as i64 || i == start + 1)
             && (update_lowband || lowband_offset == 0)
         {
             lowband_offset = i;
+        }
+        if i == start + 1 {
+            // `special_hybrid_folding` (RFC 8251): duplicate enough of the
+            // first band's folding data to fold the second band. A no-op
+            // for CELT-only mode (the bands are equally wide at start 0).
+            let n1 = m * (EBANDS[start + 1] - EBANDS[start]) as usize;
+            let n2 = m * (EBANDS[start + 2] - EBANDS[start + 1]) as usize;
+            norm.copy_within(2 * n1 - n2..n1, n1);
+            if channels == 2 {
+                norm2.copy_within(2 * n1 - n2..n1, n1);
+            }
         }
 
         ctx.tf_change = tf_res[i];
@@ -830,7 +841,7 @@ pub fn quant_all_bands(
             let mut fold_end = lowband_offset - 1;
             loop {
                 fold_end += 1;
-                if m * EBANDS[fold_end] as usize >= eff + norm_offset + n {
+                if fold_end >= i || m * EBANDS[fold_end] as usize >= eff + norm_offset + n {
                     break;
                 }
             }

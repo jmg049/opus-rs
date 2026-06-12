@@ -37,6 +37,10 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 pub mod celt;
+#[cfg(feature = "std")]
+mod decoder;
+#[cfg(feature = "std")]
+pub use decoder::OpusDecoder;
 #[cfg(feature = "experimental-codec")]
 pub mod experimental;
 #[cfg(feature = "experimental-codec")]

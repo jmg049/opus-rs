@@ -273,6 +273,19 @@ impl<'a> RangeDecoder<'a> {
         self.nbits_total += bits - current;
     }
 
+    /// Truncates the buffer to `new_len` bytes (`dec.storage -=
+    /// redundancy_bytes` in `opus_decoder.c`): an embedded redundant frame
+    /// occupies the tail, and subsequent raw bits must not read into it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if raw bits were already consumed past `new_len`.
+    pub fn shrink_storage(&mut self, new_len: usize) {
+        assert!(new_len <= self.buf.len());
+        assert!(self.end_offs == 0, "shrink before reading raw bits");
+        self.buf = &self.buf[..new_len];
+    }
+
     /// The current range size.
     ///
     /// After decoding a symbol sequence this must exactly equal the encoder's
