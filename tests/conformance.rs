@@ -429,3 +429,202 @@ fn decodes_at_every_api_rate() {
         assert_eq!(total, 2 * (1_201_440 * fs as usize / 48_000), "duration at {fs} Hz");
     }
 }
+
+/// The official `opus_compare` quality metric (48 kHz stereo form):
+/// windowed per-frequency energies, psychoacoustic masking from the
+/// reference, two-frame averaging, and the log-spectral distortion pooling.
+/// Returns (internal weighted error, quality percent); conformance is
+/// quality ≥ 0.
+#[cfg(feature = "std")]
+#[allow(clippy::needless_range_loop, reason = "mirrors the reference triple loops")]
+fn opus_compare_48k_stereo(x: &[f32], y: &[f32]) -> (f64, f64) {
+    const NBANDS: usize = 21;
+    const NFREQS: usize = 240;
+    const BANDS: [usize; NBANDS + 1] = [
+        0, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 68, 80, 96, 120, 156, 200,
+    ];
+    const WIN: usize = 480;
+    const STEP: usize = 120;
+    const NCH: usize = 2;
+
+    assert_eq!(x.len(), y.len());
+    let nframes = (x.len() / NCH - WIN + STEP) / STEP;
+
+    // Hann window and DFT twiddles.
+    let window: Vec<f32> = (0..WIN)
+        .map(|j| 0.5 - 0.5 * (2.0 * core::f32::consts::PI / (WIN - 1) as f32 * j as f32).cos())
+        .collect();
+    let c: Vec<f32> = (0..WIN)
+        .map(|j| (2.0 * core::f32::consts::PI / WIN as f32 * j as f32).cos())
+        .collect();
+    let s: Vec<f32> = (0..WIN)
+        .map(|j| (2.0 * core::f32::consts::PI / WIN as f32 * j as f32).sin())
+        .collect();
+
+    let band_energy = |input: &[f32], out_bands: bool| -> (Vec<f32>, Vec<f32>) {
+        let mut bands = vec![0.0f32; if out_bands { nframes * NBANDS * NCH } else { 0 }];
+        let mut ps = vec![0.0f32; nframes * NFREQS * NCH];
+        let mut xw = vec![0.0f32; NCH * WIN];
+        for xi in 0..nframes {
+            for ci in 0..NCH {
+                for xk in 0..WIN {
+                    xw[ci * WIN + xk] = window[xk] * input[(xi * STEP + xk) * NCH + ci];
+                }
+            }
+            let mut xj = 0usize;
+            for bi in 0..NBANDS {
+                let mut p = [0.0f32; 2];
+                while xj < BANDS[bi + 1] {
+                    for ci in 0..NCH {
+                        let mut re = 0.0f32;
+                        let mut im = 0.0f32;
+                        let mut ti = 0usize;
+                        for xk in 0..WIN {
+                            re += c[ti] * xw[ci * WIN + xk];
+                            im -= s[ti] * xw[ci * WIN + xk];
+                            ti += xj;
+                            if ti >= WIN {
+                                ti -= WIN;
+                            }
+                        }
+                        let pwr = re * re + im * im + 100_000.0;
+                        ps[(xi * NFREQS + xj) * NCH + ci] = pwr;
+                        p[ci] += pwr;
+                    }
+                    xj += 1;
+                }
+                if out_bands {
+                    let width = (BANDS[bi + 1] - BANDS[bi]) as f32;
+                    bands[(xi * NBANDS + bi) * NCH] = p[0] / width;
+                    bands[(xi * NBANDS + bi) * NCH + 1] = p[1] / width;
+                }
+            }
+        }
+        (bands, ps)
+    };
+
+    let (mut xb, mut xps) = band_energy(x, true);
+    let (_, mut yps) = band_energy(y, false);
+
+    for xi in 0..nframes {
+        // Frequency masking: 10 dB/Bark up, 15 dB/Bark down.
+        for bi in 1..NBANDS {
+            for ci in 0..NCH {
+                xb[(xi * NBANDS + bi) * NCH + ci] += 0.1 * xb[(xi * NBANDS + bi - 1) * NCH + ci];
+            }
+        }
+        for bi in (0..NBANDS - 1).rev() {
+            for ci in 0..NCH {
+                xb[(xi * NBANDS + bi) * NCH + ci] += 0.03 * xb[(xi * NBANDS + bi + 1) * NCH + ci];
+            }
+        }
+        // Temporal masking: -3 dB / 2.5 ms.
+        if xi > 0 {
+            for bi in 0..NBANDS {
+                for ci in 0..NCH {
+                    xb[(xi * NBANDS + bi) * NCH + ci] += 0.5 * xb[((xi - 1) * NBANDS + bi) * NCH + ci];
+                }
+            }
+        }
+        // Cross-talk allowance.
+        for bi in 0..NBANDS {
+            let l = xb[(xi * NBANDS + bi) * NCH];
+            let r = xb[(xi * NBANDS + bi) * NCH + 1];
+            xb[(xi * NBANDS + bi) * NCH] += 0.01 * r;
+            xb[(xi * NBANDS + bi) * NCH + 1] += 0.01 * l;
+        }
+        // Apply masking to both spectra.
+        for bi in 0..NBANDS {
+            for xj in BANDS[bi]..BANDS[bi + 1] {
+                for ci in 0..NCH {
+                    let m = 0.1 * xb[(xi * NBANDS + bi) * NCH + ci];
+                    xps[(xi * NFREQS + xj) * NCH + ci] += m;
+                    yps[(xi * NFREQS + xj) * NCH + ci] += m;
+                }
+            }
+        }
+    }
+
+    // Two-frame averaging.
+    for xj in 0..BANDS[NBANDS] {
+        for ci in 0..NCH {
+            let mut xtmp = xps[xj * NCH + ci];
+            let mut ytmp = yps[xj * NCH + ci];
+            for xi in 1..nframes {
+                let x2 = xps[(xi * NFREQS + xj) * NCH + ci];
+                let y2 = yps[(xi * NFREQS + xj) * NCH + ci];
+                xps[(xi * NFREQS + xj) * NCH + ci] += xtmp;
+                yps[(xi * NFREQS + xj) * NCH + ci] += ytmp;
+                xtmp = x2;
+                ytmp = y2;
+            }
+        }
+    }
+
+    // Pool the log-spectral distortion.
+    let mut err = 0.0f64;
+    for xi in 0..nframes {
+        let mut ef = 0.0f64;
+        for bi in 0..NBANDS {
+            let mut eb = 0.0f64;
+            for xj in BANDS[bi]..BANDS[bi + 1] {
+                for ci in 0..NCH {
+                    let re =
+                        f64::from(yps[(xi * NFREQS + xj) * NCH + ci]) / f64::from(xps[(xi * NFREQS + xj) * NCH + ci]);
+                    let mut im = re - re.ln() - 1.0;
+                    // Less sensitive around the SILK/CELT crossover.
+                    if (79..=81).contains(&xj) {
+                        im *= 0.1;
+                    }
+                    if xj == 80 {
+                        im *= 0.1;
+                    }
+                    eb += im;
+                }
+            }
+            eb /= ((BANDS[bi + 1] - BANDS[bi]) * NCH) as f64;
+            ef += eb * eb;
+        }
+        ef /= NBANDS as f64;
+        let ef2 = ef * ef;
+        err += ef2 * ef2;
+    }
+    let err = (err / nframes as f64).powf(1.0 / 16.0);
+    let q = 100.0 * (1.0 - 0.5 * (1.0 + err).ln() / 1.13f64.ln());
+    (err, q)
+}
+
+/// The official conformance criterion: `opus_compare` quality ≥ 0 against
+/// the reference decode, for every vector. Slow (naive DFT over the whole
+/// suite) - run explicitly with `cargo test --release -- --ignored`.
+#[cfg(feature = "std")]
+#[test]
+#[ignore = "minutes of DFT; run with --release -- --ignored"]
+fn official_quality_metric_passes_every_vector() {
+    use opus_native::OpusDecoder;
+
+    let Some(dir) = vectors_dir() else { return };
+    for (name, _) in VECTORS {
+        let bits = std::fs::read(dir.join(format!("{name}.bit"))).expect("read .bit");
+        let reference = std::fs::read(dir.join(format!("{name}.dec"))).expect("read .dec");
+        let refpcm: Vec<f32> = reference
+            .chunks_exact(2)
+            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])))
+            .collect();
+
+        let mut decoder = OpusDecoder::new(2);
+        let mut pcm: Vec<f32> = Vec::new();
+        for pkt in parse_bit_file(&bits) {
+            pcm.extend(
+                decoder
+                    .decode_packet_i16(&pkt.data)
+                    .expect("valid")
+                    .into_iter()
+                    .map(f32::from),
+            );
+        }
+        let (err, q) = opus_compare_48k_stereo(&refpcm, &pcm);
+        eprintln!("{name}: opus_compare quality {q:.1}% (err {err:.6})");
+        assert!(q >= 0.0, "{name}: FAILS the official metric (err {err})");
+    }
+}
