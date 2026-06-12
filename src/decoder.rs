@@ -126,6 +126,12 @@ impl OpusDecoder {
             return Ok(self.decode_lost(self.last_frame_size / self.ds));
         }
         let packet = Packet::parse(data)?;
+        Ok(self.decode_parsed(&packet))
+    }
+
+    /// Decodes an already-parsed packet (the multistream layer parses
+    /// self-delimited packets itself).
+    pub(crate) fn decode_parsed(&mut self, packet: &Packet) -> Vec<f32> {
         let toc = packet.toc();
         self.stream_channels = usize::from(toc.channels());
 
@@ -139,7 +145,7 @@ impl OpusDecoder {
             );
             out.extend_from_slice(&pcm);
         }
-        Ok(out)
+        out
     }
 
     /// Like [`decode_packet`](Self::decode_packet) but converting to s16
@@ -569,20 +575,39 @@ impl std::error::Error for OggDecodeError {}
 /// See [`OggDecodeError`]. Only channel mapping family 0 (mono/stereo) is
 /// supported until a multistream decoder exists.
 pub fn decode_ogg_opus(data: &[u8]) -> Result<(Vec<f32>, crate::ogg::OpusHead), OggDecodeError> {
-    use crate::ogg::{ChannelMapping, OggOpusReader};
+    use crate::ogg::OggOpusReader;
 
     let mut reader = OggOpusReader::new(data).map_err(OggDecodeError::Container)?;
     let head = reader.head().clone();
-    if head.channel_mapping != ChannelMapping::Family0 {
-        return Err(OggDecodeError::UnsupportedMapping);
-    }
     let channels = usize::from(head.channel_count);
-    let mut decoder = OpusDecoder::new(channels);
+
+    enum AnyDecoder {
+        Single(alloc::boxed::Box<OpusDecoder>),
+        Multi(crate::multistream::MultistreamDecoder),
+    }
+    let mut decoder = match &head.channel_mapping {
+        crate::ogg::ChannelMapping::Family0 => AnyDecoder::Single(alloc::boxed::Box::new(OpusDecoder::new(channels))),
+        crate::ogg::ChannelMapping::Table {
+            stream_count,
+            coupled_count,
+            mapping,
+            ..
+        } => AnyDecoder::Multi(crate::multistream::MultistreamDecoder::with_rate(
+            48_000,
+            usize::from(*stream_count),
+            usize::from(*coupled_count),
+            mapping,
+        )),
+    };
 
     let mut pcm: Vec<f32> = Vec::new();
     let mut final_granule = 0u64;
     while let Some(pkt) = reader.next() {
-        pcm.extend(decoder.decode_packet(&pkt.data).map_err(OggDecodeError::Packet)?);
+        let frame = match &mut decoder {
+            AnyDecoder::Single(d) => d.decode_packet(&pkt.data),
+            AnyDecoder::Multi(d) => d.decode_packet(&pkt.data),
+        };
+        pcm.extend(frame.map_err(OggDecodeError::Packet)?);
         final_granule = pkt.granule_position;
     }
 

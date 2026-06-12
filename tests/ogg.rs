@@ -328,3 +328,41 @@ fn decodes_a_real_ogg_opus_file_end_to_end() {
     let snr_db = 10.0 * (sig / noise).log10();
     assert!(snr_db > 20.0, "440 Hz fit SNR {snr_db:.1} dB");
 }
+
+/// End-to-end surround decode: a 5.1 (channel mapping family 1) file of
+/// six per-channel sines through the multistream decoder. Each output
+/// channel must be dominated by one of the six encoded frequencies, all
+/// six must appear, and the duration must be exact. (Cross-checked
+/// against libopus' multistream decoder at 115.8 dB when recorded;
+/// `examples/surround_check.rs`.)
+#[cfg(feature = "std")]
+#[test]
+fn decodes_a_surround_ogg_opus_file() {
+    let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/surround_51.opus")).expect("fixture");
+    let (pcm, head) = opus_native::decode_ogg_opus(&data).expect("decode");
+    assert_eq!(head.channel_count, 6);
+    assert_eq!(pcm.len(), 48_000 * 6, "one second of 5.1 at 48 kHz");
+
+    let mut found = Vec::new();
+    for ch in 0..6 {
+        // Dominant frequency by projection over the interior.
+        let seg: Vec<f32> = pcm[8_000 * 6..40_000 * 6].iter().skip(ch).step_by(6).copied().collect();
+        let (mut best_f, mut best_p) = (0u32, 0.0f64);
+        for f in [60u32, 300, 500, 700, 1100, 1300] {
+            let w = 2.0 * core::f64::consts::PI * f64::from(f) / 48_000.0;
+            let (mut c, mut s) = (0.0f64, 0.0f64);
+            for (i, &x) in seg.iter().enumerate() {
+                c += f64::from(x) * (w * i as f64).cos();
+                s += f64::from(x) * (w * i as f64).sin();
+            }
+            let p = c * c + s * s;
+            if p > best_p {
+                best_p = p;
+                best_f = f;
+            }
+        }
+        found.push(best_f);
+    }
+    found.sort_unstable();
+    assert_eq!(found, [60, 300, 500, 700, 1100, 1300], "per-channel sines");
+}

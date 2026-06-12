@@ -394,6 +394,94 @@ impl<'a> Packet<'a> {
         Ok(Packet { toc, frames, padding })
     }
 
+    /// Parses one **self-delimited** packet from the front of `data`
+    /// (RFC 6716 Appendix B): every frame length is explicit, so the
+    /// packet does not need to span the whole buffer. Returns the packet
+    /// and the number of bytes it occupied - the framing used for all but
+    /// the last stream of a multistream payload.
+    ///
+    /// # Errors
+    ///
+    /// As [`parse`](Self::parse), plus `InvalidFrameLength` when an
+    /// explicit length overruns `data`.
+    pub fn parse_self_delimited(data: &'a [u8]) -> Result<(Self, usize), PacketError> {
+        let (&toc_byte, mut rest) = data.split_first().ok_or(PacketError::Empty)?;
+        let toc = Toc::new(toc_byte);
+
+        let mut frames = Vec::new();
+        let mut padding = 0usize;
+
+        match toc.frame_count_code() {
+            // One frame with an explicit length.
+            0 => {
+                let n = read_frame_len(&mut rest)?;
+                frames.push(take(&mut rest, n)?);
+            },
+            // Two frames, both of the signalled size.
+            1 => {
+                let n = read_frame_len(&mut rest)?;
+                frames.push(take(&mut rest, n)?);
+                frames.push(take(&mut rest, n)?);
+            },
+            // Two explicit lengths.
+            2 => {
+                let n1 = read_frame_len(&mut rest)?;
+                let n2 = read_frame_len(&mut rest)?;
+                frames.push(take(&mut rest, n1)?);
+                frames.push(take(&mut rest, n2)?);
+            },
+            // Signalled count; the last frame's length is explicit too.
+            _ => {
+                let (&count_byte, body) = rest.split_first().ok_or(PacketError::InvalidFrameLength)?;
+                rest = body;
+                let vbr = count_byte >> 7 == 1;
+                let has_padding = (count_byte >> 6) & 1 == 1;
+                let frame_count = usize::from(count_byte & 0x3F);
+
+                if frame_count == 0 || frame_count as u32 * toc.frame_size().tenth_ms() > MAX_PACKET_DURATION_TENTH_MS {
+                    return Err(PacketError::InvalidFrameCount);
+                }
+
+                if has_padding {
+                    loop {
+                        let (&b, body) = rest.split_first().ok_or(PacketError::InvalidPadding)?;
+                        rest = body;
+                        if b == 255 {
+                            padding += 254;
+                        } else {
+                            padding += usize::from(b);
+                            break;
+                        }
+                    }
+                }
+
+                if vbr {
+                    let mut lengths = Vec::with_capacity(frame_count);
+                    for _ in 0..frame_count {
+                        lengths.push(read_frame_len(&mut rest)?);
+                    }
+                    for n in lengths {
+                        frames.push(take(&mut rest, n)?);
+                    }
+                } else {
+                    let size = read_frame_len(&mut rest)?;
+                    for _ in 0..frame_count {
+                        frames.push(take(&mut rest, size)?);
+                    }
+                }
+                // The padding bytes trail the frames within this packet's
+                // region of the buffer.
+                if padding > rest.len() {
+                    return Err(PacketError::InvalidPadding);
+                }
+                rest = &rest[padding..];
+            },
+        }
+
+        let consumed = data.len() - rest.len();
+        Ok((Packet { toc, frames, padding }, consumed))
+    }
+
     /// The packet's TOC byte.
     #[must_use]
     pub const fn toc(&self) -> Toc {

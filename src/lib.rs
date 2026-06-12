@@ -40,7 +40,11 @@ pub mod celt;
 #[cfg(feature = "std")]
 mod decoder;
 #[cfg(feature = "std")]
+mod multistream;
+#[cfg(feature = "std")]
 pub use decoder::{OggDecodeError, OpusDecoder, decode_ogg_opus};
+#[cfg(feature = "std")]
+pub use multistream::MultistreamDecoder;
 #[cfg(feature = "experimental-codec")]
 pub mod experimental;
 #[cfg(feature = "experimental-codec")]
