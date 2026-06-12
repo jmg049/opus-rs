@@ -6,8 +6,9 @@ A pure-Rust implementation of the [Opus audio codec](https://opus-codec.org/)
 **No FFI. No unsafe code. No dependencies.**
 
 > **Status: pre-release, under active development.** The entropy-coding and
-> packet layers are complete and tested; the SILK and CELT decoders are in
-> progress. Nothing here is API-stable yet.
+> packet layers are complete and tested, and the CELT decoder is bit-exact on
+> all CELT-only official test vectors; the SILK decoder is in progress.
+> Nothing here is API-stable yet.
 
 ## Why
 
@@ -45,7 +46,7 @@ framework.
 | `packet` | §3 | TOC parsing, frame packing codes 0-3, padding, R1-R7 validation |
 | `lpc` | §4.2/§5.2 groundwork | Levinson-Durbin, LP analysis/synthesis, pitch estimation, LTP |
 | `experimental` | - | pre-conformance frame codec, mode detection, crossover, mid/side (feature `experimental-codec`) |
-| `celt` | §4.3 | in progress: entropy/energy/allocation/shape decoding done; anti-collapse + MDCT + frame driver next |
+| `celt` | §4.3 | complete decoder: bit-exact on every CELT-only official vector (final-range oracle), 83-104 dB SNR against the reference PCM |
 | `silk` | §4.2 | planned (conformant decoder) |
 | `ogg` | RFC 3533 + RFC 7845 | Ogg pages (CRC, lacing, resync), packet reassembly, `OpusHead`/`OpusTags`, granule/pre-skip/end-trim timing, stream reader + writer |
 
@@ -55,9 +56,12 @@ The decoder is being built against the official
 [Opus test vectors](https://opus-codec.org/testvectors/) (RFC 8251 set).
 Fetch them with `tools/fetch-testvectors.sh` (~121 MB, not committed); the
 conformance tests in `tests/conformance.rs` skip cleanly when absent. The
-packet layer currently validates against every packet of all twelve vectors;
-the harness grows per-packet final-range equality and reference-PCM quality
-scoring as the SILK/CELT decoders land.
+packet layer validates against every packet of all twelve vectors. The
+CELT-only vectors (testvector01/07/11) decode with per-packet final-range
+equality - the bit-exactness oracle - and the synthesized PCM scores
+83-104 dB SNR against the reference decode, far beyond the official
+`opus_compare` criterion. The harness grows the remaining vectors as the
+SILK decoder lands.
 
 ## License
 
