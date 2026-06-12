@@ -57,6 +57,9 @@ pub struct OpusDecoder {
     /// Frame duration of the last good packet (`st->frame_size`), capping
     /// each concealment chunk.
     last_frame_size: usize,
+    /// The SILK control of the last good SILK/hybrid packet, reused for
+    /// concealment.
+    last_silk_ctl: Option<DecControl>,
     /// The range state of the most recent packet
     /// (`OPUS_GET_FINAL_RANGE`): main coder XOR redundant coder.
     final_range: u32,
@@ -80,6 +83,7 @@ impl OpusDecoder {
             prev_redundancy: false,
             prev_end: 21,
             last_frame_size: 120,
+            last_silk_ctl: None,
             final_range: 0,
         }
     }
@@ -141,7 +145,41 @@ impl OpusDecoder {
     pub fn decode_lost(&mut self, frame_size: usize) -> Vec<f32> {
         let channels = self.channels;
         let mut out = vec![0.0f32; frame_size * channels];
-        if self.prev_mode == Some(Mode::CeltOnly) {
+        let mode = if self.prev_redundancy {
+            Some(Mode::CeltOnly)
+        } else {
+            self.prev_mode
+        };
+        // SILK and hybrid concealment (the SILK half).
+        if matches!(mode, Some(Mode::SilkOnly | Mode::Hybrid))
+            && let Some(base_ctl) = self.last_silk_ctl
+        {
+            let mut done = 0usize;
+            while done < frame_size {
+                let mut n = (frame_size - done).min(self.last_frame_size);
+                if n > F20 {
+                    n = F20;
+                } else if n < F20 {
+                    if n > 480 {
+                        n = 480;
+                    } else if n > F5 && n < 480 {
+                        n = F5;
+                    }
+                }
+                let mut silk_out: Vec<i16> = Vec::new();
+                let ctl = DecControl {
+                    payload_size_ms: 10.max(1000 * n / 48000),
+                    ..base_ctl
+                };
+                self.silk.decode_lost(&ctl, &mut silk_out);
+                for (o, &s) in out[done * channels..].iter_mut().zip(silk_out.iter()) {
+                    *o += f32::from(s) / 32768.0;
+                }
+                done += n;
+            }
+        }
+        // CELT concealment: CELT-only entirely, hybrid the 8+ kHz half.
+        if mode == Some(Mode::CeltOnly) {
             let mut done = 0usize;
             while done < frame_size {
                 // Each chunk is capped by the last good packet's frame
@@ -159,6 +197,16 @@ impl OpusDecoder {
                 }
                 let pcm = self.celt.decode_lost(n, 0, self.prev_end);
                 out[done * channels..(done + n) * channels].copy_from_slice(&pcm);
+                done += n;
+            }
+        } else if mode == Some(Mode::Hybrid) {
+            let mut done = 0usize;
+            while done < frame_size {
+                let n = (frame_size - done).min(F20);
+                let pcm = self.celt.decode_lost(n, 17, self.prev_end);
+                for (o, &v) in out[done * channels..].iter_mut().zip(pcm.iter()) {
+                    *o += v;
+                }
                 done += n;
             }
         }
@@ -180,9 +228,12 @@ impl OpusDecoder {
                 || (mode != Mode::CeltOnly && prev == Mode::CeltOnly)
         });
         // Transition audio comes from concealment in the previous mode.
-        // CELT concealment is ported; SILK/hybrid concealment still fades
-        // from silence.
         let mut pcm_transition = vec![0.0f32; F5 * channels];
+        if transition && mode == Mode::CeltOnly {
+            let n = F5.min(frame_size);
+            let t = self.decode_lost(n);
+            pcm_transition[..n * channels].copy_from_slice(&t);
+        }
 
         let mut dec = RangeDecoder::new(data);
 
@@ -213,6 +264,7 @@ impl OpusDecoder {
             for call in 0..n_calls {
                 self.silk.decode(&mut dec, &ctl, call == 0, &mut silk_out);
             }
+            self.last_silk_ctl = Some(ctl);
             debug_assert_eq!(silk_out.len(), frame_size * channels);
             pcm_silk[..silk_out.len()].copy_from_slice(&silk_out);
         }

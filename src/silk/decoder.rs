@@ -34,7 +34,8 @@ const RAND_INCREMENT: i32 = 907_633_515;
 
 /// `silk_RAND`.
 #[inline]
-const fn silk_rand(seed: i32) -> i32 {
+#[must_use]
+pub(crate) const fn silk_rand(seed: i32) -> i32 {
     RAND_INCREMENT.wrapping_add(seed.wrapping_mul(RAND_MULTIPLIER))
 }
 
@@ -73,6 +74,10 @@ pub(crate) struct SilkChannelDecoder {
     pub ec_prev: EcPrevState,
     /// Parameter-stage history (gain index, previous NLSFs, reset flag).
     pub params: ParamState,
+    /// Concealment state (`sPLC`).
+    pub plc: super::plc::PlcState,
+    /// Comfort-noise state (`sCNG`).
+    pub cng: super::plc::CngState,
 }
 
 impl SilkChannelDecoder {
@@ -99,6 +104,8 @@ impl SilkChannelDecoder {
             indices: SideInfoIndices::default(),
             ec_prev: EcPrevState::default(),
             params: ParamState::default(),
+            plc: super::plc::PlcState::default(),
+            cng: super::plc::CngState::default(),
         }
     }
 
@@ -165,9 +172,31 @@ impl SilkChannelDecoder {
         self.out_buf.copy_within(self.frame_length..self.ltp_mem_length, 0);
         self.out_buf[mv_len..self.ltp_mem_length].copy_from_slice(&xq[..self.frame_length]);
 
+        // Capture the concealment model, then comfort-noise bookkeeping
+        // and the energy fade-in after a loss.
+        let frame_length = self.frame_length;
+        self.plc(&mut ctrl, &mut xq[..frame_length], false);
         self.loss_cnt = 0;
-        self.prev_signal_type = i32::from(self.indices.signal_type);
         self.params.first_frame_after_reset = false;
+        self.cng(&ctrl, &mut xq[..frame_length]);
+        self.plc_glue_frames(&mut xq[..frame_length]);
+        self.lag_prev = ctrl.pitch_l[self.nb_subfr - 1];
+    }
+
+    /// `silk_decode_frame` for a lost packet: concealment, history update,
+    /// comfort noise, and state bookkeeping.
+    pub fn decode_frame_lost(&mut self, xq: &mut [i16]) {
+        debug_assert!(xq.len() >= self.frame_length);
+        let frame_length = self.frame_length;
+        let mut ctrl = DecoderControl::default();
+        self.plc(&mut ctrl, &mut xq[..frame_length], true);
+
+        let mv_len = self.ltp_mem_length - frame_length;
+        self.out_buf.copy_within(frame_length..self.ltp_mem_length, 0);
+        self.out_buf[mv_len..self.ltp_mem_length].copy_from_slice(&xq[..frame_length]);
+
+        self.cng(&ctrl, &mut xq[..frame_length]);
+        self.plc_glue_frames(&mut xq[..frame_length]);
         self.lag_prev = ctrl.pitch_l[self.nb_subfr - 1];
     }
 

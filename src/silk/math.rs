@@ -230,6 +230,24 @@ pub(crate) const fn rshift_round64(a: i64, shift: i32) -> i64 {
     ((a >> (shift - 1)) + 1) >> 1
 }
 
+/// `silk_SMULTT`: `(a >> 16) * (b >> 16)`.
+#[inline]
+pub(crate) const fn smultt(a: i32, b: i32) -> i32 {
+    (a >> 16).wrapping_mul(b >> 16)
+}
+
+/// `silk_ADD_SAT16`.
+#[inline]
+pub(crate) const fn add_sat16(a: i16, b: i16) -> i16 {
+    a.saturating_add(b)
+}
+
+/// `silk_ADD_RSHIFT_uint`: `a + (b >> shift)` in unsigned arithmetic.
+#[inline]
+pub(crate) const fn add_rshift_uint(a: u32, b: u32, shift: i32) -> u32 {
+    a.wrapping_add(b >> shift)
+}
+
 /// `silk_MUL`: 32-bit multiply (the reference asserts no overflow).
 #[inline]
 pub(crate) const fn mul(a: i32, b: i32) -> i32 {

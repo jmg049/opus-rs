@@ -41,6 +41,10 @@ spectrograms = { version = "1.4", path = "../../rust/spectrograms", optional = t
 name = "decode_throughput"
 required-features = ["std"]
 
+[[example]]
+name = "loss_check"
+required-features = ["std"]
+
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"

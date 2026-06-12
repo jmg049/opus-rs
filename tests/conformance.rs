@@ -377,23 +377,30 @@ fn concealment_survives_simulated_loss() {
     use opus_native::OpusDecoder;
 
     let Some(dir) = vectors_dir() else { return };
-    let bits = std::fs::read(dir.join("testvector01.bit")).expect("read .bit");
-    let packets = parse_bit_file(&bits);
+    // (vector, expected total stereo samples - matching libopus' output
+    // for the same loss pattern exactly, verified differentially.)
+    for (name, want_total) in [
+        ("testvector01", 2_830_080usize),
+        ("testvector02", 2_402_880),
+        ("testvector04", 2_556_480),
+        ("testvector05", 2_608_320),
+    ] {
+        let bits = std::fs::read(dir.join(format!("{name}.bit"))).expect("read .bit");
+        let packets = parse_bit_file(&bits);
 
-    let mut decoder = OpusDecoder::new(2);
-    let mut total = 0usize;
-    for (idx, pkt) in packets.iter().enumerate() {
-        let pcm = if idx % 10 == 7 {
-            let parsed = Packet::parse(&pkt.data).expect("valid");
-            let dur = parsed.frames().len() * parsed.toc().frame_size().samples_per_channel_48k();
-            decoder.decode_lost(dur)
-        } else {
-            decoder.decode_packet(&pkt.data).expect("valid")
-        };
-        assert!(pcm.iter().all(|v| v.is_finite() && v.abs() < 2.0));
-        total += pcm.len();
+        let mut decoder = OpusDecoder::new(2);
+        let mut total = 0usize;
+        for (idx, pkt) in packets.iter().enumerate() {
+            let pcm = if idx % 10 == 7 {
+                let parsed = Packet::parse(&pkt.data).expect("valid");
+                let dur = parsed.frames().len() * parsed.toc().frame_size().samples_per_channel_48k();
+                decoder.decode_lost(dur)
+            } else {
+                decoder.decode_packet(&pkt.data).expect("valid")
+            };
+            assert!(pcm.iter().all(|v| v.is_finite() && v.abs() < 2.0));
+            total += pcm.len();
+        }
+        assert_eq!(total, want_total, "{name}: total stereo samples");
     }
-    // Matches libopus' sample count for this loss pattern exactly
-    // (verified against the reference in a differential run).
-    assert_eq!(total, 2_830_080, "total stereo samples");
 }

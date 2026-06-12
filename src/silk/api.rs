@@ -315,6 +315,94 @@ impl SilkDecoder {
     }
 }
 
+impl SilkDecoder {
+    /// `silk_Decode` with `FLAG_PACKET_LOST`: conceals one frame per call,
+    /// appending interleaved output at the API rate to `out`. The decoder
+    /// must have decoded at least one good packet.
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid control parameters or if no packet was decoded
+    /// yet.
+    pub fn decode_lost(&mut self, ctl: &DecControl, out: &mut Vec<i16>) {
+        let fs_khz = (ctl.internal_sample_rate >> 10) + 1;
+        // A lost call reconfigures the frame duration exactly like a good
+        // one (the payload size says how much to conceal).
+        let nb_subfr = if ctl.payload_size_ms == 10 { 2 } else { 4 };
+        for n in 0..ctl.channels_internal {
+            let ch = self.channels[n].as_mut().expect("a good packet first");
+            debug_assert_eq!(ch.dec.fs_khz, fs_khz);
+            ch.dec.set_frame_duration(nb_subfr);
+        }
+        let frame_length = self.channels[0].as_ref().expect("configured").dec.frame_length;
+
+        // Concealed frames reuse the previous stereo prediction.
+        let ms_pred_q13 = [
+            i32::from(self.stereo.pred_prev_q13[0]),
+            i32::from(self.stereo.pred_prev_q13[1]),
+        ];
+
+        let mut mid = vec![0i16; frame_length + 2];
+        let mut side = vec![0i16; frame_length + 2];
+        let has_side = !self.prev_decode_only_middle;
+        for n in 0..ctl.channels_internal {
+            if n == 0 || has_side {
+                let buf = if n == 0 { &mut mid } else { &mut side };
+                let ch = self.channels[n].as_mut().expect("configured");
+                ch.dec.decode_frame_lost(&mut buf[2..]);
+            } else {
+                side[2..].fill(0);
+            }
+            let ch = self.channels[n].as_mut().expect("configured");
+            ch.n_frames_decoded += 1;
+        }
+
+        if ctl.channels_api == 2 && ctl.channels_internal == 2 {
+            stereo_ms_to_lr(
+                &mut self.stereo,
+                &mut mid,
+                &mut side,
+                &ms_pred_q13,
+                fs_khz,
+                frame_length,
+            );
+        } else {
+            mid[..2].copy_from_slice(&self.stereo.s_mid);
+            self.stereo.s_mid.copy_from_slice(&mid[frame_length..frame_length + 2]);
+        }
+
+        let n_samples_out = frame_length * ctl.api_sample_rate as usize / (fs_khz as usize * 1000);
+        let base = out.len();
+        out.resize(base + n_samples_out * ctl.channels_api, 0);
+        let mut resampled = vec![0i16; n_samples_out];
+        for n in 0..ctl.channels_api.min(ctl.channels_internal) {
+            let src = if n == 0 { &mid } else { &side };
+            let ch = self.channels[n].as_mut().expect("configured");
+            ch.resampler.process(&mut resampled, &src[1..=frame_length]);
+            if ctl.channels_api == 2 {
+                for (i, &s) in resampled.iter().enumerate() {
+                    out[base + n + 2 * i] = s;
+                }
+            } else {
+                out[base..].copy_from_slice(&resampled);
+            }
+        }
+        if ctl.channels_api == 2 && ctl.channels_internal == 1 {
+            for i in 0..n_samples_out {
+                out[base + 1 + 2 * i] = out[base + 2 * i];
+            }
+        }
+
+        // Remove the gain clamping so energy doesn't bounce back after
+        // losses while it is decaying.
+        for n in 0..ctl.channels_internal {
+            if let Some(ch) = self.channels[n].as_mut() {
+                ch.dec.params.last_gain_index = 10;
+            }
+        }
+    }
+}
+
 impl ChannelState {
     fn resampler_rate(&self) -> i32 {
         self.resampler.output_rate_hz()
