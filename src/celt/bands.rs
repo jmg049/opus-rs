@@ -29,6 +29,8 @@ use alloc::vec::Vec;
 use crate::range::RangeDecoder;
 
 use super::modes::{EBANDS, LOG_N, NB_EBANDS};
+#[cfg(test)]
+use super::rate::AllocEc;
 use super::rate::{BITRES, bits2pulses, get_pulses, pulses2bits};
 use super::vq::{Spread, alg_unquant, renormalise_vector};
 
@@ -1158,7 +1160,17 @@ mod tests {
                     let caps = init_caps(lm, channels);
                     let offsets = [0i32; NB_EBANDS];
                     let total = (frame_bytes as i32 * 8) << BITRES;
-                    let alloc = compute_allocation(&mut dec, 0, NB_EBANDS, &offsets, &caps, 5, total, channels, lm);
+                    let alloc = compute_allocation(
+                        &mut AllocEc::Dec(&mut dec),
+                        0,
+                        NB_EBANDS,
+                        &offsets,
+                        &caps,
+                        5,
+                        total,
+                        channels,
+                        lm,
+                    );
 
                     let mut x = vec![0.0f32; nsamples];
                     let mut y = vec![0.0f32; nsamples];
@@ -1196,6 +1208,164 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Encode-side mono band-shape coding for long blocks only (`B == 1`):
+/// the time/frequency reshaping (Haar/Hadamard) is an identity there, so
+/// each band reduces to recursive theta splits plus PVQ
+/// (`quant_all_bands`, encoder direction, no resynthesis).
+pub(crate) mod encode {
+    use crate::range::RangeEncoder;
+
+    use super::super::modes::{EBANDS, LOG_N, NB_EBANDS};
+    use super::super::rate::{BITRES, bits2pulses, pulses2bits};
+    use super::super::vq::{Spread, alg_quant, stereo_itheta};
+    use super::{QTHETA_OFFSET, bitexact_cos, bitexact_log2tan, compute_qn, frac_mul16};
+
+    /// `compute_theta`, encoder direction (mono): measures the angle
+    /// between the halves, quantises, entropy-codes it, and returns
+    /// `(itheta_q14, delta, qalloc)`.
+    fn compute_theta_enc(
+        enc: &mut RangeEncoder,
+        x: &[f32],
+        y: &[f32],
+        i: usize,
+        b: &mut i32,
+        b0: usize,
+        lm: i32,
+    ) -> (i32, i32, i32) {
+        let n = x.len();
+        let pulse_cap = i32::from(LOG_N[i]) + lm * (1 << BITRES);
+        let offset = (pulse_cap >> 1) - QTHETA_OFFSET;
+        let qn = compute_qn(n, *b, offset, pulse_cap, false);
+
+        let mut itheta = stereo_itheta(x, y, false);
+        let tell = enc.tell_frac() as i32;
+        if qn != 1 {
+            itheta = (itheta * qn + 8192) >> 14;
+
+            // Entropy coding of the angle: uniform for a time split,
+            // triangular otherwise.
+            if b0 > 1 {
+                enc.encode_uint(itheta as u32, qn as u32 + 1);
+            } else {
+                let ft = (((qn >> 1) + 1) * ((qn >> 1) + 1)) as u32;
+                let (fl, fs) = if itheta <= qn >> 1 {
+                    (((itheta * (itheta + 1)) >> 1) as u32, (itheta + 1) as u32)
+                } else {
+                    (
+                        ft - ((((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1) as u32),
+                        (qn + 1 - itheta) as u32,
+                    )
+                };
+                enc.encode(fl, fl + fs, ft);
+            }
+            itheta = itheta * 16384 / qn;
+        }
+        let qalloc = enc.tell_frac() as i32 - tell;
+        *b -= qalloc;
+
+        let delta = if itheta == 0 {
+            -16384
+        } else if itheta == 16384 {
+            16384
+        } else {
+            let imid = bitexact_cos(itheta as i16);
+            let iside = bitexact_cos((16384 - itheta) as i16);
+            frac_mul16((n as i32 - 1) << 7, bitexact_log2tan(i32::from(iside), i32::from(imid)))
+        };
+        (itheta, delta, qalloc)
+    }
+
+    /// `quant_partition`, encoder direction (mono, `B == 1`).
+    fn quant_partition_enc(
+        enc: &mut RangeEncoder,
+        x: &mut [f32],
+        mut b: i32,
+        i: usize,
+        lm: i32,
+        spread: Spread,
+        remaining_bits: &mut i32,
+    ) {
+        let n = x.len();
+        if lm != -1 && b > super::super::rate::cache_max_bits(i, lm) + 12 && n > 2 {
+            let half = n >> 1;
+            let lm = lm - 1;
+            let (xs, ys) = x.split_at_mut(half);
+            let (itheta, delta, qalloc) = compute_theta_enc(enc, xs, ys, i, &mut b, 1, lm);
+
+            let mbits = 0.max(b.min((b - delta) / 2));
+            let sbits = b - mbits;
+            *remaining_bits -= qalloc;
+
+            let rebalance = *remaining_bits;
+            if mbits >= sbits {
+                quant_partition_enc(enc, xs, mbits, i, lm, spread, remaining_bits);
+                let rebalance = mbits - (rebalance - *remaining_bits);
+                let mut sbits = sbits;
+                if rebalance > 3 << BITRES && itheta != 0 {
+                    sbits += rebalance - (3 << BITRES);
+                }
+                quant_partition_enc(enc, ys, sbits, i, lm, spread, remaining_bits);
+            } else {
+                quant_partition_enc(enc, ys, sbits, i, lm, spread, remaining_bits);
+                let rebalance = sbits - (rebalance - *remaining_bits);
+                let mut mbits = mbits;
+                if rebalance > 3 << BITRES && itheta != 16384 {
+                    mbits += rebalance - (3 << BITRES);
+                }
+                quant_partition_enc(enc, xs, mbits, i, lm, spread, remaining_bits);
+            }
+        } else {
+            // Leaf: one PVQ codeword.
+            let mut q = bits2pulses(i, lm, b);
+            let mut curr_bits = pulses2bits(i, lm, q);
+            *remaining_bits -= curr_bits;
+            while *remaining_bits < 0 && q > 0 {
+                *remaining_bits += curr_bits;
+                q -= 1;
+                curr_bits = pulses2bits(i, lm, q);
+                *remaining_bits -= curr_bits;
+            }
+            if q != 0 {
+                let k = super::super::rate::get_pulses(q) as usize;
+                let _ = alg_quant(enc, x, k, spread, 1);
+            }
+        }
+    }
+
+    /// `quant_all_bands`, encoder direction (mono, long blocks).
+    #[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
+    pub(crate) fn quant_all_bands_enc(
+        enc: &mut RangeEncoder,
+        start: usize,
+        end: usize,
+        x: &mut [f32],
+        shape_bits: &[i32; NB_EBANDS],
+        spread: Spread,
+        total_bits: i32,
+        mut balance: i32,
+        lm: usize,
+        coded_bands: usize,
+    ) {
+        let m = 1usize << lm;
+        for i in start..end {
+            let tell = enc.tell_frac() as i32;
+            if i != start {
+                balance -= tell;
+            }
+            let mut remaining_bits = total_bits - tell - 1;
+            let b = if i < coded_bands {
+                let curr_balance = balance / 3.min(coded_bands as i32 - i as i32);
+                0.max(16383.min((remaining_bits + 1).min(shape_bits[i] + curr_balance)))
+            } else {
+                0
+            };
+            let band = &mut x[m * EBANDS[i] as usize..m * EBANDS[i + 1] as usize];
+            quant_partition_enc(enc, band, b, i, lm as i32, spread, &mut remaining_bits);
+            balance += shape_bits[i] + tell;
         }
     }
 }

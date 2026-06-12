@@ -28,6 +28,7 @@
 pub mod bands;
 pub mod cwrs;
 pub mod decoder;
+pub mod encoder;
 pub mod energy;
 pub mod laplace;
 pub mod mdct;

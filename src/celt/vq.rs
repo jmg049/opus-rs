@@ -165,6 +165,158 @@ pub fn renormalise_vector(x: &mut [f32], gain: f32) {
     }
 }
 
+/// `fast_atan2f` (mathops.h): the float approximation the encoder uses for
+/// the theta angle.
+fn fast_atan2f(y: f32, x: f32) -> f32 {
+    const CA: f32 = 0.43157974;
+    #[allow(clippy::excessive_precision, reason = "verbatim reference constant")]
+    const CB: f32 = 0.67848403;
+    const CC: f32 = 0.08595542;
+    const CE: f32 = core::f32::consts::FRAC_PI_2;
+    let x2 = x * x;
+    let y2 = y * y;
+    // For very small values the answer doesn't matter.
+    if x2 + y2 < 1e-18 {
+        return 0.0;
+    }
+    if x2 < y2 {
+        let den = (y2 + CB * x2) * (y2 + CC * x2);
+        -x * y * (y2 + CA * x2) / den + if y < 0.0 { -CE } else { CE }
+    } else {
+        let den = (x2 + CB * y2) * (x2 + CC * y2);
+        x * y * (x2 + CA * y2) / den + (if y < 0.0 { -CE } else { CE }) - (if x * y < 0.0 { -CE } else { CE })
+    }
+}
+
+/// `stereo_itheta`: the quantisation angle between two halves (or
+/// mid/side when `stereo`), in Q14.
+pub(crate) fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool) -> i32 {
+    let mut emid = 1e-15f32;
+    let mut eside = 1e-15f32;
+    if stereo {
+        for (&a, &b) in x.iter().zip(y.iter()) {
+            let m = 0.5 * a + 0.5 * b;
+            let s = 0.5 * a - 0.5 * b;
+            emid += m * m;
+            eside += s * s;
+        }
+    } else {
+        for &a in x {
+            emid += a * a;
+        }
+        for &b in y {
+            eside += b * b;
+        }
+    }
+    let mid = emid.sqrt();
+    let side = eside.sqrt();
+    // 0.63662 = 2/pi
+    #[allow(clippy::approx_constant, reason = "the reference uses this truncated 2/pi")]
+    const TWO_OVER_PI: f32 = 0.63662;
+    (0.5 + 16384.0 * TWO_OVER_PI * fast_atan2f(side, mid)).floor() as i32
+}
+
+/// `op_pvq_search` (float build): finds the K-pulse vector maximising
+/// correlation with `x` (made non-negative in place).
+fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: usize) -> f32 {
+    let n = x.len();
+    let mut y = vec![0.0f32; n];
+    let mut signx = vec![false; n];
+
+    let mut sum = 0.0f32;
+    for j in 0..n {
+        signx[j] = x[j] < 0.0;
+        x[j] = x[j].abs();
+        iy[j] = 0;
+    }
+
+    let mut xy = 0.0f32;
+    let mut yy = 0.0f32;
+    let mut pulses_left = k as i32;
+
+    // Pre-search by projecting onto the pyramid.
+    if k > (n >> 1) {
+        for &v in x.iter() {
+            sum += v;
+        }
+        // Replace tiny or non-finite inputs with a single pulse at 0.
+        if !(sum > 1e-15 && sum < 64.0) {
+            x[0] = 1.0;
+            for v in &mut x[1..] {
+                *v = 0.0;
+            }
+            sum = 1.0;
+        }
+        // K+e with e < 1 guarantees no more than K pulses.
+        let rcp = (k as f32 + 0.8) / sum;
+        for j in 0..n {
+            // Rounding towards zero is important here.
+            iy[j] = (rcp * x[j]).floor() as i32;
+            y[j] = iy[j] as f32;
+            yy += y[j] * y[j];
+            xy += x[j] * y[j];
+            y[j] *= 2.0;
+            pulses_left -= iy[j];
+        }
+    }
+
+    // Pathological inputs: dump the remainder into the first bin.
+    if pulses_left > n as i32 + 3 {
+        let tmp = pulses_left as f32;
+        yy += tmp * tmp;
+        yy += tmp * y[0];
+        iy[0] += pulses_left;
+        pulses_left = 0;
+    }
+
+    for _ in 0..pulses_left {
+        let mut best_id = 0usize;
+        yy += 1.0;
+        let mut rxy = xy + x[0];
+        rxy *= rxy;
+        let mut best_den = yy + y[0];
+        let mut best_num = rxy;
+        for j in 1..n {
+            let mut rxy = xy + x[j];
+            rxy *= rxy;
+            let ryy = yy + y[j];
+            if best_den * rxy > ryy * best_num {
+                best_den = ryy;
+                best_num = rxy;
+                best_id = j;
+            }
+        }
+        xy += x[best_id];
+        yy += y[best_id];
+        y[best_id] += 2.0;
+        iy[best_id] += 1;
+    }
+
+    for j in 0..n {
+        if signx[j] {
+            iy[j] = -iy[j];
+        }
+    }
+    yy
+}
+
+/// Encodes one band's shape with `k` pulses (`alg_quant`, no resynthesis).
+pub(crate) fn alg_quant(
+    enc: &mut crate::range::RangeEncoder,
+    x: &mut [f32],
+    k: usize,
+    spread: Spread,
+    b: usize,
+) -> u32 {
+    let n = x.len();
+    debug_assert!(k > 0 && n > 1);
+    let mut iy = vec![0i32; n];
+    exp_rotation(x, 1, b, k, spread);
+    let _yy = op_pvq_search(x, &mut iy, k);
+    super::cwrs::encode_pulses(enc, &iy, k);
+    extract_collapse_mask(&iy, b)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;

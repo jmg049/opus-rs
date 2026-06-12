@@ -345,7 +345,17 @@ impl CeltDecoder {
         };
         bits -= anti_collapse_rsv;
 
-        let alloc = compute_allocation(dec, start, end, &offsets, &caps, alloc_trim, bits, c, lm);
+        let alloc = compute_allocation(
+            &mut super::rate::AllocEc::Dec(dec),
+            start,
+            end,
+            &offsets,
+            &caps,
+            alloc_trim,
+            bits,
+            c,
+            lm,
+        );
 
         decode_fine_energy(dec, &mut self.energy, start, end, &alloc.fine_quant, c);
 

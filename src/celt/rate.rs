@@ -23,7 +23,38 @@
 //! and PVQ pulse counts per band size: [`bits2pulses`]/[`pulses2bits`] with
 //! the pseudo-pulse scale of [`get_pulses`].
 
-use crate::range::RangeDecoder;
+use crate::range::{RangeDecoder, RangeEncoder};
+
+/// The entropy-coder direction threaded through the allocation: the three
+/// explicitly coded parameters (band skips, intensity, dual stereo) are
+/// read by the decoder and written - from chosen decisions - by the
+/// encoder. Everything else in the allocation is implicit and identical.
+pub enum AllocEc<'a, 'b> {
+    /// Decoding: parameters come from the bitstream.
+    Dec(&'a mut RangeDecoder<'b>),
+    /// Encoding: parameters are the encoder's decisions.
+    Enc {
+        /// The range encoder.
+        enc: &'a mut RangeEncoder,
+        /// Highest band to keep coded (the skip decision threshold,
+        /// `signalBandwidth`).
+        signal_bandwidth: usize,
+        /// First intensity-stereo band (stereo only).
+        intensity: usize,
+        /// Dual-stereo flag (stereo only).
+        dual_stereo: bool,
+    },
+}
+
+impl AllocEc<'_, '_> {
+    #[allow(dead_code, reason = "useful symmetry helper for future encode paths")]
+    fn tell_frac(&self) -> u32 {
+        match self {
+            AllocEc::Dec(d) => d.tell_frac(),
+            AllocEc::Enc { enc, .. } => enc.tell_frac(),
+        }
+    }
+}
 
 use super::modes::{EBANDS, LOG_N, MAX_FINE_BITS, NB_EBANDS};
 use super::tables::{BAND_ALLOCATION, CACHE_BITS, CACHE_CAPS, CACHE_INDEX, LOG2_FRAC_TABLE, NB_ALLOC_VECTORS};
@@ -144,7 +175,7 @@ pub struct Allocation {
 )]
 #[must_use]
 pub fn compute_allocation(
-    dec: &mut RangeDecoder,
+    ec: &mut AllocEc,
     start: usize,
     end: usize,
     offsets: &[i32; NB_EBANDS],
@@ -258,7 +289,7 @@ pub fn compute_allocation(
     }
 
     interp_bits2pulses(
-        dec,
+        ec,
         InterpParams {
             start,
             end,
@@ -298,7 +329,7 @@ struct InterpParams {
 /// the two bracketing quality vectors, decodes band skips and the stereo
 /// parameters, then splits each band's budget into fine-energy and shape
 /// bits.
-fn interp_bits2pulses(dec: &mut RangeDecoder, p: InterpParams) -> Allocation {
+fn interp_bits2pulses(ec: &mut AllocEc, p: InterpParams) -> Allocation {
     let InterpParams {
         start,
         end,
@@ -382,7 +413,17 @@ fn interp_bits2pulses(dec: &mut RangeDecoder, p: InterpParams) -> Allocation {
 
         if band_bits >= thresh[j].max(alloc_floor + (1 << BITRES)) {
             // The skip decision is explicitly coded.
-            if dec.decode_bit_logp(1) {
+            let keep = match ec {
+                AllocEc::Dec(d) => d.decode_bit_logp(1),
+                AllocEc::Enc {
+                    enc, signal_bandwidth, ..
+                } => {
+                    let keep = j <= *signal_bandwidth;
+                    enc.encode_bit_logp(keep, 1);
+                    keep
+                },
+            };
+            if keep {
                 break coded_bands;
             }
             psum += 1 << BITRES;
@@ -406,7 +447,14 @@ fn interp_bits2pulses(dec: &mut RangeDecoder, p: InterpParams) -> Allocation {
 
     // Intensity and dual-stereo parameters.
     let intensity = if intensity_rsv > 0 {
-        start + dec.decode_uint((coded_bands + 1 - start) as u32).unwrap_or(0) as usize
+        match ec {
+            AllocEc::Dec(d) => start + d.decode_uint((coded_bands + 1 - start) as u32).unwrap_or(0) as usize,
+            AllocEc::Enc { enc, intensity, .. } => {
+                let chosen = (*intensity).clamp(start, coded_bands + 1);
+                enc.encode_uint((chosen - start) as u32, (coded_bands + 1 - start) as u32);
+                chosen
+            },
+        }
     } else {
         0
     };
@@ -415,7 +463,13 @@ fn interp_bits2pulses(dec: &mut RangeDecoder, p: InterpParams) -> Allocation {
         dual_stereo_rsv = 0;
     }
     let dual_stereo = if dual_stereo_rsv > 0 {
-        dec.decode_bit_logp(1)
+        match ec {
+            AllocEc::Dec(d) => d.decode_bit_logp(1),
+            AllocEc::Enc { enc, dual_stereo, .. } => {
+                enc.encode_bit_logp(*dual_stereo, 1);
+                *dual_stereo
+            },
+        }
     } else {
         false
     };
@@ -603,7 +657,17 @@ mod tests {
                     let cap = init_caps(lm, channels);
                     let offsets = [0i32; NB_EBANDS];
                     let total = total_bits << BITRES;
-                    let alloc = compute_allocation(&mut dec, 0, NB_EBANDS, &offsets, &cap, 5, total, channels, lm);
+                    let alloc = compute_allocation(
+                        &mut AllocEc::Dec(&mut dec),
+                        0,
+                        NB_EBANDS,
+                        &offsets,
+                        &cap,
+                        5,
+                        total,
+                        channels,
+                        lm,
+                    );
 
                     assert!(alloc.coded_bands > 0 && alloc.coded_bands <= NB_EBANDS);
                     let mut spent = alloc.balance;
@@ -647,7 +711,17 @@ mod tests {
         let buf = enc.finalize().expect("fits");
         let mut dec = RangeDecoder::new(&buf);
 
-        let alloc = compute_allocation(&mut dec, 0, NB_EBANDS, &offsets, &cap, 5, total, channels, lm);
+        let alloc = compute_allocation(
+            &mut AllocEc::Dec(&mut dec),
+            0,
+            NB_EBANDS,
+            &offsets,
+            &cap,
+            5,
+            total,
+            channels,
+            lm,
+        );
         assert_eq!(alloc.coded_bands, NB_EBANDS - 1, "one band skipped");
         assert_eq!(alloc.intensity, 7);
         assert!(alloc.dual_stereo);
