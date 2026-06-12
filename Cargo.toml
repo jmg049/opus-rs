@@ -49,6 +49,10 @@ required-features = ["std"]
 name = "fec_check"
 required-features = ["std"]
 
+[[example]]
+name = "rate_check"
+required-features = ["std"]
+
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"

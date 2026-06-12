@@ -39,6 +39,21 @@ const FRAC_FIR_12: [[i16; 4]; 12] = [
     [-46, 425, -1375, 2996],
 ];
 
+/// `silk_Resampler_3_4_COEFS`: 2 AR2 taps then the FIR half-tables.
+const COEFS_3_4: [i16; 29] = [
+    -20694, -13867, -49, 64, 17, -157, 353, -496, 163, 11047, 22205, -39, 6, 91, -170, 186, 23, -896, 6336, 19928, -19,
+    -36, 102, -89, -24, 328, -951, 2568, 15909,
+];
+
+/// `silk_Resampler_2_3_COEFS`: 2 AR2 taps then the FIR half-tables.
+const COEFS_2_3: [i16; 20] = [
+    -14457, -14019, 64, 128, -122, 36, 310, -768, 584, 9267, 17733, 12, 128, 18, -142, 288, -117, -865, 4123, 14459,
+];
+
+/// `silk_Resampler_1_2_COEFS`: 2 AR2 taps then the FIR half-tables.
+const COEFS_1_2: [i16; 14] = [
+    616, -14323, -10, 39, 58, -46, -84, 120, 184, -315, -541, 1284, 5380, 9024,
+];
 /// `delay_matrix_dec[in][out]` over rates [8, 12, 16] × [8, 12, 16, 24, 48].
 const DELAY_MATRIX_DEC: [[i8; 5]; 3] = [[4, 0, 2, 0, 0], [0, 9, 4, 7, 4], [0, 3, 12, 7, 7]];
 
@@ -55,6 +70,8 @@ enum Method {
     Up2Hq,
     /// Other upsampling ratios: 2× allpass + fractional FIR.
     IirFir,
+    /// Downsampling: AR2 filter + FIR interpolation.
+    DownFir,
 }
 
 /// Decoder-side resampler state (`silk_resampler_state_struct`).
@@ -62,6 +79,11 @@ enum Method {
 pub(crate) struct Resampler {
     s_iir: [i32; 6],
     s_fir: [i16; ORDER_FIR_12],
+    /// Down-FIR history (i32 domain).
+    s_fir32: [i32; 36],
+    fir_order: usize,
+    fir_fracs: i32,
+    coefs: &'static [i16],
     delay_buf: [i16; 48],
     input_delay: usize,
     fs_in_khz: usize,
@@ -80,16 +102,37 @@ impl Resampler {
             "decoder input rate"
         );
         assert!(
-            matches!(fs_hz_out, 8000 | 12000 | 16000 | 24000 | 48000) && fs_hz_out >= fs_hz_in,
+            matches!(fs_hz_out, 8000 | 12000 | 16000 | 24000 | 48000),
             "unsupported decoder output rate {fs_hz_out}"
         );
 
+        // (FIR order, fractional phases, coefficients) for the down paths.
+        let mut fir_order = 0usize;
+        let mut fir_fracs = 0i32;
+        let mut coefs: &'static [i16] = &[];
         let method = if fs_hz_out == fs_hz_in {
             Method::Copy
         } else if fs_hz_out == 2 * fs_hz_in {
             Method::Up2Hq
-        } else {
+        } else if fs_hz_out > fs_hz_in {
             Method::IirFir
+        } else if fs_hz_out * 4 == fs_hz_in * 3 {
+            fir_fracs = 3;
+            fir_order = 18; // RESAMPLER_DOWN_ORDER_FIR0
+            coefs = &COEFS_3_4;
+            Method::DownFir
+        } else if fs_hz_out * 3 == fs_hz_in * 2 {
+            fir_fracs = 2;
+            fir_order = 18;
+            coefs = &COEFS_2_3;
+            Method::DownFir
+        } else if fs_hz_out * 2 == fs_hz_in {
+            fir_fracs = 1;
+            fir_order = 24; // RESAMPLER_DOWN_ORDER_FIR1
+            coefs = &COEFS_1_2;
+            Method::DownFir
+        } else {
+            panic!("unsupported decoder rate pair {fs_hz_in}->{fs_hz_out}");
         };
         let up2x = i32::from(method == Method::IirFir);
 
@@ -103,6 +146,10 @@ impl Resampler {
         Resampler {
             s_iir: [0; 6],
             s_fir: [0; ORDER_FIR_12],
+            s_fir32: [0; 36],
+            fir_order,
+            fir_fracs,
+            coefs,
             delay_buf: [0; 48],
             input_delay: DELAY_MATRIX_DEC[rate_id(fs_hz_in)][rate_id(fs_hz_out)] as usize,
             fs_in_khz,
@@ -145,6 +192,10 @@ impl Resampler {
             Method::IirFir => {
                 self.iir_fir(out_head, &head[..self.fs_in_khz]);
                 self.iir_fir(out_tail, tail);
+            },
+            Method::DownFir => {
+                self.down_fir(out_head, &head[..self.fs_in_khz]);
+                self.down_fir(out_tail, tail);
             },
             Method::Copy => {
                 out_head.copy_from_slice(&head[..self.fs_in_khz]);
@@ -211,6 +262,83 @@ impl Resampler {
     }
 }
 
+impl Resampler {
+    /// `silk_resampler_private_down_FIR`: a second-order AR filter (Q8)
+    /// followed by polyphase FIR interpolation.
+    fn down_fir(&mut self, out: &mut [i16], input: &[i16]) {
+        let ord = self.fir_order;
+        let mut buf = vec![0i32; self.batch_size + ord];
+        buf[..ord].copy_from_slice(&self.s_fir32[..ord]);
+
+        let a_q14 = &self.coefs[..2];
+        let fir_coefs = &self.coefs[2..];
+        let index_increment_q16 = self.inv_ratio_q16;
+        let mut in_off = 0usize;
+        let mut out_off = 0usize;
+        let mut n_samples_in;
+        loop {
+            n_samples_in = (input.len() - in_off).min(self.batch_size);
+
+            // Second-order AR filter (output in Q8).
+            {
+                let s = &mut self.s_iir;
+                for (k, o) in buf[ord..ord + n_samples_in].iter_mut().enumerate() {
+                    let out32 = s[0].wrapping_add(i32::from(input[in_off + k]) << 8);
+                    *o = out32;
+                    let out32 = out32 << 2;
+                    s[0] = smlawb(s[1], out32, i32::from(a_q14[0]));
+                    s[1] = smulwb(out32, i32::from(a_q14[1]));
+                }
+            }
+
+            let max_index_q16 = (n_samples_in as i32) << 16;
+            let mut index_q16 = 0i32;
+            while index_q16 < max_index_q16 {
+                let base = (index_q16 >> 16) as usize;
+                let res_q6 = match ord {
+                    18 => {
+                        // Fractional phase selects the half-table pair.
+                        let ind = smulwb(index_q16 & 0xffff, self.fir_fracs) as usize;
+                        let p1 = &fir_coefs[9 * ind..];
+                        let p2 = &fir_coefs[9 * (self.fir_fracs as usize - 1 - ind)..];
+                        let mut r = smulwb(buf[base], i32::from(p1[0]));
+                        for t in 1..9 {
+                            r = smlawb(r, buf[base + t], i32::from(p1[t]));
+                        }
+                        for t in 0..9 {
+                            r = smlawb(r, buf[base + 17 - t], i32::from(p2[t]));
+                        }
+                        r
+                    },
+                    24 => {
+                        let mut r = smulwb(buf[base].wrapping_add(buf[base + 23]), i32::from(fir_coefs[0]));
+                        for t in 1..12 {
+                            r = smlawb(
+                                r,
+                                buf[base + t].wrapping_add(buf[base + 23 - t]),
+                                i32::from(fir_coefs[t]),
+                            );
+                        }
+                        r
+                    },
+                    _ => unreachable!("down-FIR order"),
+                };
+                out[out_off] = rshift_round(res_q6, 6).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                out_off += 1;
+                index_q16 += index_increment_q16;
+            }
+
+            in_off += n_samples_in;
+            if in_off < input.len() {
+                buf.copy_within(n_samples_in..n_samples_in + ord, 0);
+            } else {
+                break;
+            }
+        }
+        self.s_fir32[..ord].copy_from_slice(&buf[n_samples_in..n_samples_in + ord]);
+    }
+}
+
 /// `silk_resampler_private_up2_HQ`: 2× allpass upsampler (Q10 state) -
 /// three allpass sections per phase, the last a notch just above Nyquist.
 fn up2_hq_into(s: &mut [i32; 6], out: &mut [i16], input: &[i16]) {
@@ -250,6 +378,62 @@ fn up2_hq_into(s: &mut [i32; 6], out: &mut [i16], input: &[i16]) {
         s[5] = out32_2 + x2;
 
         out[2 * k + 1] = rshift_round(out32_1, 10).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    }
+}
+
+#[cfg(test)]
+mod down_tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::*;
+
+    /// Pins from the compiled reference down-FIR paths (two consecutive
+    /// frames so the AR2/FIR/delay state carries): per frame, the first 8
+    /// outputs then the last 2.
+    #[test]
+    fn down_paths_match_reference_pins() {
+        #[allow(clippy::type_complexity, reason = "pin fixture")]
+        let cases: [(i32, i32, [(&[i16], [i16; 2]); 2]); 3] = [
+            (
+                16000,
+                12000,
+                [
+                    (&[0, 0, 0, 2, -2, 3, -4, 11], [-1310, -1773]),
+                    (&[-1121, -1372, -868, -1006, -584, -659, -295, -318], [392, 583]),
+                ],
+            ),
+            (
+                12000,
+                8000,
+                [
+                    (&[0, -8, -3, -9, 9, -71, -1792, -1912], [1138, 1318]),
+                    (&[1531, 1604, 2097, -297, -2363, -1222, -1705, -1010], [1755, 1726]),
+                ],
+            ),
+            (
+                16000,
+                8000,
+                [
+                    (&[0, -4, -2, -7, 14, -94, -1745, -1823], [-2316, -1239]),
+                    (&[-1511, -911, -946, -501, -432, -52, 70, 405], [214, 597]),
+                ],
+            ),
+        ];
+        for (fs_in, fs_out, frames) in cases {
+            let mut r = Resampler::new(fs_in, fs_out);
+            let in_len = (fs_in / 1000 * 20) as usize;
+            let out_len = (fs_out / 1000 * 20) as usize;
+            for (frame, (want_head, want_tail)) in frames.iter().enumerate() {
+                let input: Vec<i16> = (0..in_len)
+                    .map(|i| (((i + frame * in_len) as i32 * 119) % 4001 - 2000) as i16)
+                    .collect();
+                let mut out = vec![0i16; out_len];
+                r.process(&mut out, &input);
+                assert_eq!(&out[..8], *want_head, "{fs_in}->{fs_out} frame {frame} head");
+                assert_eq!(&out[out_len - 2..], *want_tail, "{fs_in}->{fs_out} frame {frame} tail");
+            }
+        }
     }
 }
 

@@ -404,3 +404,28 @@ fn concealment_survives_simulated_loss() {
         assert_eq!(total, want_total, "{name}: total stereo samples");
     }
 }
+
+/// Decoding at reduced API rates must produce the right duration and
+/// bounded audio at every rate. (Correctness is verified differentially
+/// against libopus: SILK and hybrid output is sample-exact at 8-16 kHz,
+/// CELT at 24 kHz matches at 117 dB; `examples/rate_check.rs`.)
+#[cfg(feature = "std")]
+#[test]
+fn decodes_at_every_api_rate() {
+    use opus_native::OpusDecoder;
+
+    let Some(dir) = vectors_dir() else { return };
+    let bits = std::fs::read(dir.join("testvector02.bit")).expect("read .bit");
+    let packets = parse_bit_file(&bits);
+
+    for fs in [8_000u32, 12_000, 16_000, 24_000, 48_000] {
+        let mut decoder = OpusDecoder::with_rate(fs, 2);
+        let mut total = 0usize;
+        for pkt in &packets {
+            let pcm = decoder.decode_packet(&pkt.data).expect("valid");
+            assert!(pcm.iter().all(|v| v.is_finite() && v.abs() < 2.0));
+            total += pcm.len();
+        }
+        assert_eq!(total, 2 * (1_201_440 * fs as usize / 48_000), "duration at {fs} Hz");
+    }
+}

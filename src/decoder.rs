@@ -35,10 +35,10 @@ const fn end_band(bw: Bandwidth) -> usize {
 
 /// `smooth_fade`: crossfade `in1` → `in2` over 2.5 ms using the squared
 /// CELT window.
-fn smooth_fade(in1: &[f32], in2: &[f32], out: &mut [f32], overlap: usize, channels: usize) {
+fn smooth_fade(in1: &[f32], in2: &[f32], out: &mut [f32], overlap: usize, channels: usize, inc: usize) {
     for c in 0..channels {
         for i in 0..overlap {
-            let w = WINDOW120[i] * WINDOW120[i];
+            let w = WINDOW120[i * inc] * WINDOW120[i * inc];
             out[i * channels + c] = w * in2[i * channels + c] + (1.0 - w) * in1[i * channels + c];
         }
     }
@@ -47,6 +47,10 @@ fn smooth_fade(in1: &[f32], in2: &[f32], out: &mut [f32], overlap: usize, channe
 /// The Opus decoder for one stream at 48 kHz output.
 pub struct OpusDecoder {
     channels: usize,
+    /// Output rate in Hz (48/24/16/12/8 kHz).
+    fs: u32,
+    /// 48000 / fs.
+    ds: usize,
     silk: SilkDecoder,
     celt: CeltDecoder,
     stream_channels: usize,
@@ -73,11 +77,25 @@ impl OpusDecoder {
     /// Panics unless `channels` is 1 or 2.
     #[must_use]
     pub fn new(channels: usize) -> Self {
+        Self::with_rate(48_000, channels)
+    }
+
+    /// Creates a decoder producing `channels` at `fs_hz`
+    /// (48/24/16/12/8 kHz), like `opus_decoder_create`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on unsupported rates or channel counts.
+    #[must_use]
+    pub fn with_rate(fs_hz: u32, channels: usize) -> Self {
         assert!(channels == 1 || channels == 2);
+        assert!(matches!(fs_hz, 48_000 | 24_000 | 16_000 | 12_000 | 8_000));
         OpusDecoder {
             channels,
+            fs: fs_hz,
+            ds: (48_000 / fs_hz) as usize,
             silk: SilkDecoder::new(),
-            celt: CeltDecoder::new(channels),
+            celt: CeltDecoder::with_rate(channels, fs_hz),
             stream_channels: channels,
             prev_mode: None,
             prev_redundancy: false,
@@ -105,7 +123,7 @@ impl OpusDecoder {
         // frame of the last good packet's duration (comfort noise after
         // the concealment fades out).
         if data.len() <= 1 {
-            return Ok(self.decode_lost(self.last_frame_size));
+            return Ok(self.decode_lost(self.last_frame_size / self.ds));
         }
         let packet = Packet::parse(data)?;
         let toc = packet.toc();
@@ -150,7 +168,10 @@ impl OpusDecoder {
     #[must_use]
     pub fn decode_lost(&mut self, frame_size: usize) -> Vec<f32> {
         let channels = self.channels;
-        let mut out = vec![0.0f32; frame_size * channels];
+        let ds = self.ds;
+        // Work in 48 kHz units internally (the TOC's units).
+        let frame_size = frame_size * ds;
+        let mut out = vec![0.0f32; frame_size / ds * channels];
         let mode = if self.prev_redundancy {
             Some(Mode::CeltOnly)
         } else {
@@ -178,7 +199,7 @@ impl OpusDecoder {
                     ..base_ctl
                 };
                 self.silk.decode_lost(&ctl, &mut silk_out);
-                for (o, &s) in out[done * channels..].iter_mut().zip(silk_out.iter()) {
+                for (o, &s) in out[done / ds * channels..].iter_mut().zip(silk_out.iter()) {
                     *o += f32::from(s) / 32768.0;
                 }
                 done += n;
@@ -202,7 +223,7 @@ impl OpusDecoder {
                     }
                 }
                 let pcm = self.celt.decode_lost(n, 0, self.prev_end);
-                out[done * channels..(done + n) * channels].copy_from_slice(&pcm);
+                out[done / ds * channels..(done + n) / ds * channels].copy_from_slice(&pcm);
                 done += n;
             }
         } else if mode == Some(Mode::Hybrid) {
@@ -210,7 +231,7 @@ impl OpusDecoder {
             while done < frame_size {
                 let n = (frame_size - done).min(F20);
                 let pcm = self.celt.decode_lost(n, 17, self.prev_end);
-                for (o, &v) in out[done * channels..].iter_mut().zip(pcm.iter()) {
+                for (o, &v) in out[done / ds * channels..].iter_mut().zip(pcm.iter()) {
                     *o += v;
                 }
                 done += n;
@@ -237,15 +258,17 @@ impl OpusDecoder {
     pub fn decode_fec(&mut self, data: &[u8], frame_size: usize) -> Result<Vec<f32>, PacketError> {
         let packet = Packet::parse(data)?;
         let toc = packet.toc();
+        let ds = self.ds;
+        let frame_size = frame_size * ds;
         let packet_frame_size = toc.frame_size().samples_per_channel_48k();
 
         // No FEC possible: run plain concealment.
         if frame_size < packet_frame_size || toc.mode() == Mode::CeltOnly || self.prev_mode == Some(Mode::CeltOnly) {
-            return Ok(self.decode_lost(frame_size));
+            return Ok(self.decode_lost(frame_size / ds));
         }
 
         // Conceal everything except the FEC'd duration.
-        let mut out = self.decode_lost(frame_size - packet_frame_size);
+        let mut out = self.decode_lost((frame_size - packet_frame_size) / ds);
 
         // Decode the LBRR data of the first frame.
         self.stream_channels = usize::from(toc.channels());
@@ -265,7 +288,7 @@ impl OpusDecoder {
             } else {
                 16000
             },
-            api_sample_rate: 48000,
+            api_sample_rate: self.fs as i32,
             payload_size_ms,
         };
         let mut silk_out: Vec<i16> = Vec::new();
@@ -273,7 +296,7 @@ impl OpusDecoder {
         self.last_silk_ctl = Some(ctl);
 
         let base = out.len();
-        out.resize(base + packet_frame_size * channels, 0.0);
+        out.resize(base + packet_frame_size / ds * channels, 0.0);
         for (o, &s) in out[base..].iter_mut().zip(silk_out.iter()) {
             *o = f32::from(s) / 32768.0;
         }
@@ -298,9 +321,13 @@ impl OpusDecoder {
     #[allow(clippy::too_many_lines, reason = "mirrors the reference sequence")]
     fn decode_frame(&mut self, data: &[u8], mode: Mode, bandwidth: Bandwidth, frame_size: usize) -> Vec<f32> {
         let channels = self.channels;
+        let ds = self.ds;
+        let n_fs = frame_size / ds;
+        let f2_5 = F2_5 / ds;
+        let f5 = F5 / ds;
         let mut len = data.len();
         let audiosize = frame_size;
-        let mut pcm = vec![0.0f32; frame_size * channels];
+        let mut pcm = vec![0.0f32; n_fs * channels];
 
         // Transition detection (mode switch involving CELT-only).
         let transition = self.prev_mode.is_some_and(|prev| {
@@ -308,17 +335,17 @@ impl OpusDecoder {
                 || (mode != Mode::CeltOnly && prev == Mode::CeltOnly)
         });
         // Transition audio comes from concealment in the previous mode.
-        let mut pcm_transition = vec![0.0f32; F5 * channels];
+        let mut pcm_transition = vec![0.0f32; f5 * channels];
         if transition && mode == Mode::CeltOnly {
             let n = F5.min(frame_size);
-            let t = self.decode_lost(n);
-            pcm_transition[..n * channels].copy_from_slice(&t);
+            let t = self.decode_lost(n / ds);
+            pcm_transition[..n / ds * channels].copy_from_slice(&t);
         }
 
         let mut dec = RangeDecoder::new(data);
 
         // SILK half (SILK-only and hybrid).
-        let mut pcm_silk = vec![0i16; frame_size.max(480) * channels];
+        let mut pcm_silk = vec![0i16; (frame_size.max(480) / ds) * channels];
         if mode != Mode::CeltOnly {
             if self.prev_mode == Some(Mode::CeltOnly) {
                 self.silk = SilkDecoder::new();
@@ -336,7 +363,7 @@ impl OpusDecoder {
                 } else {
                     16000
                 },
-                api_sample_rate: 48000,
+                api_sample_rate: self.fs as i32,
                 payload_size_ms,
             };
             let mut silk_out: Vec<i16> = Vec::new();
@@ -345,7 +372,7 @@ impl OpusDecoder {
                 self.silk.decode(&mut dec, &ctl, call == 0, &mut silk_out);
             }
             self.last_silk_ctl = Some(ctl);
-            debug_assert_eq!(silk_out.len(), frame_size * channels);
+            debug_assert_eq!(silk_out.len(), n_fs * channels);
             pcm_silk[..silk_out.len()].copy_from_slice(&silk_out);
         }
 
@@ -384,12 +411,12 @@ impl OpusDecoder {
         if transition && mode != Mode::CeltOnly && self.prev_mode == Some(Mode::CeltOnly) {
             let n = F5.min(frame_size);
             let pcm = self.celt.decode_lost(n, 0, self.prev_end);
-            pcm_transition[..n * channels].copy_from_slice(&pcm);
+            pcm_transition[..n / ds * channels].copy_from_slice(&pcm);
         }
         let start_band = if mode == Mode::CeltOnly { 0 } else { 17 };
 
         let celt_end = end_band(bandwidth);
-        let mut redundant_audio = vec![0.0f32; F5 * channels];
+        let mut redundant_audio = vec![0.0f32; f5 * channels];
         let mut redundant_rng = 0u32;
 
         // 5 ms redundant frame for CELT → SILK (decoded with the carried
@@ -407,7 +434,7 @@ impl OpusDecoder {
             let celt_frame_size = F20.min(frame_size);
             // Discard stale CELT state on a mode change.
             if self.prev_mode.is_some_and(|prev| prev != mode) && !self.prev_redundancy {
-                self.celt = CeltDecoder::new(channels);
+                self.celt = CeltDecoder::with_rate(channels, self.fs);
             }
             pcm = self.celt.decode_frame(
                 &mut dec,
@@ -418,7 +445,7 @@ impl OpusDecoder {
                 celt_end,
             );
             if celt_frame_size < frame_size {
-                pcm.resize(frame_size * channels, 0.0);
+                pcm.resize(n_fs * channels, 0.0);
             }
         } else {
             // For hybrid → SILK transitions the CELT MDCT fades out by
@@ -429,7 +456,7 @@ impl OpusDecoder {
                 let fade = self
                     .celt
                     .decode_frame(&mut sdec, 2, F2_5, self.stream_channels, 0, celt_end);
-                pcm[..F2_5 * channels].copy_from_slice(&fade);
+                pcm[..f2_5 * channels].copy_from_slice(&fade);
             }
         }
 
@@ -443,19 +470,19 @@ impl OpusDecoder {
         // 5 ms redundant frame for SILK → CELT (fresh CELT state), faded
         // in over the last 2.5 ms of the frame.
         if redundancy && !celt_to_silk {
-            self.celt = CeltDecoder::new(channels);
+            self.celt = CeltDecoder::with_rate(channels, self.fs);
             let tail = &data[data.len() - redundancy_bytes..];
             let mut rdec = RangeDecoder::new(tail);
             redundant_audio =
                 self.celt
                     .decode_frame(&mut rdec, redundancy_bytes, F5, self.stream_channels, 0, celt_end);
             redundant_rng = rdec.range_size();
-            let off = channels * (frame_size - F2_5);
+            let off = channels * (n_fs - f2_5);
             let faded: Vec<f32> = {
                 let in1 = &pcm[off..];
-                let in2 = &redundant_audio[channels * F2_5..];
-                let mut out = vec![0.0f32; F2_5 * channels];
-                smooth_fade(in1, in2, &mut out, F2_5, channels);
+                let in2 = &redundant_audio[channels * f2_5..];
+                let mut out = vec![0.0f32; f2_5 * channels];
+                smooth_fade(in1, in2, &mut out, f2_5, channels, ds);
                 out
             };
             pcm[off..].copy_from_slice(&faded);
@@ -464,36 +491,36 @@ impl OpusDecoder {
         // CELT → SILK redundancy: the first 2.5 ms is the redundant audio,
         // fading into the SILK output (skipped if the CELT state was stale).
         if redundancy && celt_to_silk && (self.prev_mode != Some(Mode::SilkOnly) || self.prev_redundancy) {
-            pcm[..F2_5 * channels].copy_from_slice(&redundant_audio[..F2_5 * channels]);
+            pcm[..f2_5 * channels].copy_from_slice(&redundant_audio[..f2_5 * channels]);
             let faded: Vec<f32> = {
-                let in1 = &redundant_audio[channels * F2_5..];
-                let in2 = &pcm[channels * F2_5..];
-                let mut out = vec![0.0f32; F2_5 * channels];
-                smooth_fade(in1, in2, &mut out, F2_5, channels);
+                let in1 = &redundant_audio[channels * f2_5..];
+                let in2 = &pcm[channels * f2_5..];
+                let mut out = vec![0.0f32; f2_5 * channels];
+                smooth_fade(in1, in2, &mut out, f2_5, channels, ds);
                 out
             };
-            pcm[channels * F2_5..channels * 2 * F2_5].copy_from_slice(&faded);
+            pcm[channels * f2_5..channels * 2 * f2_5].copy_from_slice(&faded);
         }
 
         // Mode-transition fade (from the concealment placeholder).
         if transition {
             if audiosize >= F5 {
-                pcm[..channels * F2_5].copy_from_slice(&pcm_transition[..channels * F2_5]);
+                pcm[..channels * f2_5].copy_from_slice(&pcm_transition[..channels * f2_5]);
                 let faded: Vec<f32> = {
-                    let in1 = &pcm_transition[channels * F2_5..];
-                    let in2 = &pcm[channels * F2_5..];
-                    let mut out = vec![0.0f32; F2_5 * channels];
-                    smooth_fade(in1, in2, &mut out, F2_5, channels);
+                    let in1 = &pcm_transition[channels * f2_5..];
+                    let in2 = &pcm[channels * f2_5..];
+                    let mut out = vec![0.0f32; f2_5 * channels];
+                    smooth_fade(in1, in2, &mut out, f2_5, channels, ds);
                     out
                 };
-                pcm[channels * F2_5..channels * 2 * F2_5].copy_from_slice(&faded);
+                pcm[channels * f2_5..channels * 2 * f2_5].copy_from_slice(&faded);
             } else {
                 let faded: Vec<f32> = {
-                    let mut out = vec![0.0f32; F2_5 * channels];
-                    smooth_fade(&pcm_transition, &pcm, &mut out, F2_5, channels);
+                    let mut out = vec![0.0f32; f2_5 * channels];
+                    smooth_fade(&pcm_transition, &pcm, &mut out, f2_5, channels, ds);
                     out
                 };
-                pcm[..channels * F2_5].copy_from_slice(&faded);
+                pcm[..channels * f2_5].copy_from_slice(&faded);
             }
         }
 

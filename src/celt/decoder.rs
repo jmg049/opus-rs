@@ -110,6 +110,8 @@ pub struct CeltDecoder {
     /// The next frame must pre-filter and TDAC-fold the concealed overlap
     /// (`prefilter_and_fold`).
     prefilter_and_fold: bool,
+    /// Output decimation factor (`downsample`): 48000 / output rate.
+    downsample: usize,
     /// The MDCT family of the standard mode.
     mdct: MdctLookup,
 }
@@ -122,6 +124,21 @@ impl CeltDecoder {
     /// Panics if `channels` is not 1 or 2.
     #[must_use]
     pub fn new(channels: usize) -> Self {
+        Self::with_rate(channels, 48_000)
+    }
+
+    /// Creates a decoder producing output at `fs_hz`
+    /// (48/24/16/12/8 kHz; `celt_decoder_init` + `resampling_factor`).
+    ///
+    /// # Panics
+    ///
+    /// Panics on unsupported rates or channel counts.
+    #[must_use]
+    pub fn with_rate(channels: usize, fs_hz: u32) -> Self {
+        assert!(
+            matches!(fs_hz, 48_000 | 24_000 | 16_000 | 12_000 | 8_000),
+            "unsupported CELT output rate"
+        );
         assert!(channels == 1 || channels == 2, "CELT supports 1 or 2 channels");
         CeltDecoder {
             channels,
@@ -143,6 +160,7 @@ impl CeltDecoder {
             last_pitch_index: 0,
             plc_lpc: [[0.0; CELT_LPC_ORDER]; 2],
             prefilter_and_fold: false,
+            downsample: (48_000 / fs_hz) as usize,
             mdct: MdctLookup::new(1920),
         }
     }
@@ -698,18 +716,32 @@ impl CeltDecoder {
         self.deemphasis(n)
     }
 
-    /// De-emphasis of the newest `n` history samples into interleaved PCM.
+    /// De-emphasis of the newest `n` history samples into interleaved PCM,
+    /// decimating by `downsample` (`deemphasis` in celt_decoder.c).
     fn deemphasis(&mut self, n: usize) -> Vec<f32> {
         let cc = self.channels;
         let out_base = DECODE_BUFFER_SIZE - n;
-        let mut pcm = vec![0.0f32; n * cc];
+        let nd = n / self.downsample;
+        let mut pcm = vec![0.0f32; nd * cc];
+        let mut scratch = vec![0.0f32; n];
         for ch in 0..cc {
             let mut mem = self.preemph_mem[ch];
             let x = &self.decode_mem[ch][out_base..out_base + n];
-            for (j, &v) in x.iter().enumerate() {
-                let tmp = v + mem + 1e-30;
-                mem = PREEMPH_COEF * tmp;
-                pcm[j * cc + ch] = tmp * (1.0 / 32768.0);
+            if self.downsample > 1 {
+                for (j, &v) in x.iter().enumerate() {
+                    let tmp = v + mem + 1e-30;
+                    mem = PREEMPH_COEF * tmp;
+                    scratch[j] = tmp;
+                }
+                for (j, p) in pcm.iter_mut().skip(ch).step_by(cc).enumerate() {
+                    *p = scratch[j * self.downsample] * (1.0 / 32768.0);
+                }
+            } else {
+                for (j, &v) in x.iter().enumerate() {
+                    let tmp = v + mem + 1e-30;
+                    mem = PREEMPH_COEF * tmp;
+                    pcm[j * cc + ch] = tmp * (1.0 / 32768.0);
+                }
             }
             self.preemph_mem[ch] = mem;
         }
@@ -746,8 +778,11 @@ impl CeltDecoder {
                     m,
                 );
             }
-            // Zero the uncoded spectrum top.
-            let bound = m * EBANDS[eff_end] as usize;
+            // Zero the uncoded spectrum top (bounded by the output rate).
+            let mut bound = m * EBANDS[eff_end] as usize;
+            if self.downsample != 1 {
+                bound = bound.min(n / self.downsample);
+            }
             for ch in 0..c {
                 for f in &mut freq[ch * n + bound..(ch + 1) * n] {
                     *f = 0.0;
