@@ -102,6 +102,25 @@ impl SilkChannelDecoder {
         }
     }
 
+    /// Reconfigures the frame duration without resetting state (the
+    /// reference only resets when the rate changes).
+    pub fn set_frame_duration(&mut self, nb_subfr: usize) {
+        debug_assert!(nb_subfr == 2 || nb_subfr == 4);
+        self.nb_subfr = nb_subfr;
+        self.frame_length = nb_subfr * self.subfr_length;
+    }
+
+    /// Resets the side-channel prediction memory for the first coded side
+    /// frame after a mid-only stretch (`dec_API.c`).
+    pub fn reset_side_prediction(&mut self) {
+        self.out_buf.fill(0);
+        self.slpc_q14_buf.fill(0);
+        self.lag_prev = 100;
+        self.params.last_gain_index = 10;
+        self.prev_signal_type = 0;
+        self.params.first_frame_after_reset = true;
+    }
+
     /// `silk_decode_frame` (normal decode path): side information,
     /// excitation, parameters, synthesis, and history update for one frame.
     ///

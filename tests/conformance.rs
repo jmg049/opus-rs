@@ -228,3 +228,95 @@ fn celt_only_vectors_final_range_is_bit_exact_and_pcm_matches() {
         assert!(snr_db > 45.0, "{name}: PCM SNR {snr_db:.1} dB vs reference decode");
     }
 }
+
+/// Decodes every packet of the pure SILK vectors through the SILK decoder
+/// and checks the same two oracles as the CELT test: per-packet final
+/// range and PCM quality against the reference decode. (testvector12 also
+/// carries SILK data but includes hybrid packets, so it joins the suite
+/// with the Opus-level decoder.)
+#[cfg(feature = "std")]
+#[test]
+fn silk_only_vectors_final_range_is_bit_exact_and_pcm_matches() {
+    use opus_native::RangeDecoder;
+    use opus_native::silk::api::{DecControl, SilkDecoder};
+
+    let Some(dir) = vectors_dir() else { return };
+
+    for name in ["testvector02", "testvector03", "testvector04"] {
+        let bits = std::fs::read(dir.join(format!("{name}.bit"))).expect("read .bit");
+        let packets = parse_bit_file(&bits);
+        let reference = std::fs::read(dir.join(format!("{name}.dec"))).expect("read .dec");
+
+        let mut decoder = SilkDecoder::new();
+        let mut pcm: Vec<i16> = Vec::new();
+        for (pi, pkt) in packets.iter().enumerate() {
+            let parsed = Packet::parse(&pkt.data).expect("valid");
+            let toc = parsed.toc();
+            assert_eq!(toc.mode(), Mode::SilkOnly, "{name} packet {pi}");
+            let frame_ms = match toc.frame_size().samples_per_channel_48k() {
+                480 => 10,
+                960 => 20,
+                1920 => 40,
+                2880 => 60,
+                other => panic!("{name} packet {pi}: SILK frame size {other}"),
+            };
+            let ctl = DecControl {
+                channels_internal: usize::from(toc.channels()),
+                channels_api: 2,
+                internal_sample_rate: match toc.bandwidth() {
+                    opus_native::Bandwidth::NarrowBand => 8000,
+                    opus_native::Bandwidth::MediumBand => 12000,
+                    _ => 16000,
+                },
+                api_sample_rate: 48000,
+                payload_size_ms: frame_ms,
+            };
+
+            let mut final_range = 0u32;
+            for frame in parsed.frames() {
+                let mut dec = RangeDecoder::new(frame);
+                let n_calls = frame_ms.div_ceil(20).max(1);
+                for call in 0..n_calls {
+                    decoder.decode(&mut dec, &ctl, call == 0, &mut pcm);
+                }
+                final_range = dec.range_size();
+                // A SILK-only frame with at least 17 bits to spare carries
+                // a redundant 5 ms CELT frame in its tail; the recorded
+                // final range XORs both coders (opus_decoder.c).
+                if dec.tell() + 17 <= 8 * frame.len() as u32 {
+                    let _celt_to_silk = dec.decode_bit_logp(1);
+                    let redundancy_bytes = frame.len() - ((dec.tell() as usize + 7) >> 3);
+                    let tail = &frame[frame.len() - redundancy_bytes..];
+                    let mut rdec = RangeDecoder::new(tail);
+                    let mut celt = opus_native::celt::decoder::CeltDecoder::new(2);
+                    let _ = celt.decode_frame(
+                        &mut rdec,
+                        redundancy_bytes,
+                        240,
+                        ctl.channels_internal,
+                        0,
+                        // The end band follows the packet bandwidth.
+                        celt_end_band(toc.bandwidth()),
+                    );
+                    final_range = dec.range_size() ^ rdec.range_size();
+                }
+            }
+            assert_eq!(
+                final_range, pkt.final_range,
+                "{name} packet {pi}: final range mismatch (decoder desynchronized)"
+            );
+        }
+
+        assert_eq!(pcm.len(), reference.len() / 2, "{name}: PCM length");
+        let mut signal = 0.0f64;
+        let mut noise = 0.0f64;
+        for (ours, theirs) in pcm.iter().zip(reference.chunks_exact(2)) {
+            let theirs = i16::from_le_bytes([theirs[0], theirs[1]]);
+            signal += f64::from(theirs) * f64::from(theirs);
+            noise += f64::from(ours - theirs) * f64::from(ours - theirs);
+        }
+        let snr_db = 10.0 * (signal / noise.max(f64::MIN_POSITIVE)).log10();
+        eprintln!("{name}: {} packets, PCM SNR {snr_db:.1} dB", packets.len());
+        assert!(snr_db > 40.0, "{name}: PCM SNR {snr_db:.1} dB vs reference decode");
+    }
+}

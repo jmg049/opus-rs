@@ -20,6 +20,7 @@
 //! per stage and finally against the official test vectors' final-range and
 //! PCM oracles.
 
+pub mod api;
 pub(crate) mod decoder;
 pub(crate) mod gains;
 pub(crate) mod indices;

@@ -113,6 +113,11 @@ impl Resampler {
         }
     }
 
+    /// The configured output rate in Hz.
+    pub fn output_rate_hz(&self) -> i32 {
+        (self.fs_out_khz * 1000) as i32
+    }
+
     /// `silk_resampler`: converts `input` (≥ 1 ms) to the output rate;
     /// `out` receives `input.len() * fs_out / fs_in` samples.
     pub fn process(&mut self, out: &mut [i16], input: &[i16]) {
