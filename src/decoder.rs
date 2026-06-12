@@ -320,3 +320,77 @@ impl OpusDecoder {
         pcm
     }
 }
+
+/// Errors from [`decode_ogg_opus`].
+#[derive(Debug)]
+pub enum OggDecodeError {
+    /// The container or headers are malformed.
+    Container(crate::ogg::OggOpusError),
+    /// An audio packet violates RFC 6716 framing.
+    Packet(PacketError),
+    /// Channel mapping families other than 0 need a multistream decoder
+    /// (not yet implemented).
+    UnsupportedMapping,
+}
+
+impl core::fmt::Display for OggDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            OggDecodeError::Container(e) => write!(f, "Ogg Opus container error: {e}"),
+            OggDecodeError::Packet(e) => write!(f, "Opus packet error: {e}"),
+            OggDecodeError::UnsupportedMapping => {
+                write!(f, "channel mapping families other than 0 are not supported yet")
+            },
+        }
+    }
+}
+
+impl std::error::Error for OggDecodeError {}
+
+/// Decodes an in-memory Ogg Opus file end to end (RFC 7845 §4):
+/// pre-skip removal, end trimming from the final granule position, and the
+/// `OpusHead` output gain. Returns interleaved 48 kHz f32 and the parsed
+/// header.
+///
+/// # Errors
+///
+/// See [`OggDecodeError`]. Only channel mapping family 0 (mono/stereo) is
+/// supported until a multistream decoder exists.
+pub fn decode_ogg_opus(data: &[u8]) -> Result<(Vec<f32>, crate::ogg::OpusHead), OggDecodeError> {
+    use crate::ogg::{ChannelMapping, OggOpusReader};
+
+    let mut reader = OggOpusReader::new(data).map_err(OggDecodeError::Container)?;
+    let head = reader.head().clone();
+    if head.channel_mapping != ChannelMapping::Family0 {
+        return Err(OggDecodeError::UnsupportedMapping);
+    }
+    let channels = usize::from(head.channel_count);
+    let mut decoder = OpusDecoder::new(channels);
+
+    let mut pcm: Vec<f32> = Vec::new();
+    let mut final_granule = 0u64;
+    while let Some(pkt) = reader.next() {
+        pcm.extend(decoder.decode_packet(&pkt.data).map_err(OggDecodeError::Packet)?);
+        final_granule = pkt.granule_position;
+    }
+
+    // Pre-skip at the front; end trimming against the final granule.
+    let pre_skip = usize::from(head.pre_skip);
+    let total = (final_granule.saturating_sub(u64::from(head.pre_skip))) as usize;
+    let mut pcm: Vec<f32> = pcm.into_iter().skip(pre_skip * channels).collect();
+    pcm.truncate(total * channels);
+
+    // Output gain, Q7.8 dB.
+    if head.output_gain_q8 != 0 {
+        let gain = libm_exp10(f64::from(head.output_gain_q8) / (20.0 * 256.0)) as f32;
+        for v in &mut pcm {
+            *v *= gain;
+        }
+    }
+    Ok((pcm, head))
+}
+
+/// `10^x`.
+fn libm_exp10(x: f64) -> f64 {
+    (x * core::f64::consts::LN_10).exp()
+}

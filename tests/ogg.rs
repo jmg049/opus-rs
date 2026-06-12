@@ -267,3 +267,64 @@ fn opus_head_round_trips_all_families() {
     bad[9] = 3;
     assert!(OpusHead::parse(&bad).is_err());
 }
+
+/// End-to-end file decode: the ffmpeg/libopus-encoded 500 ms A440 fixture
+/// through container parsing, packet decode, pre-skip, and end trimming.
+///
+/// The duration must be exact, every packet's final range must match the
+/// values recorded from libopus decoding the same packets, and the audio
+/// must fit a 440 Hz sine at the encode's own quality (~25 dB for this
+/// low-bitrate hybrid fixture).
+#[cfg(feature = "std")]
+#[test]
+fn decodes_a_real_ogg_opus_file_end_to_end() {
+    let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine_mono.opus")).expect("fixture");
+    let (pcm, head) = opus_native::decode_ogg_opus(&data).expect("decode");
+
+    assert_eq!(head.channel_count, 1);
+    assert_eq!(head.pre_skip, 312);
+    assert_eq!(pcm.len(), 24_000, "500 ms at 48 kHz after pre-skip and trim");
+
+    // Per-packet final ranges recorded from libopus 1.5.2 decoding these
+    // exact packets (the PCM also matched at 123 dB SNR when recorded).
+    const FINAL_RANGES: [u32; 26] = [
+        234180096, 566826752, 743515392, 786692608, 16007633, 51959808, 18082048, 544261376, 60771840, 29612544,
+        1676097792, 477368832, 234494208, 180129280, 35754240, 857939456, 146146560, 1461526, 132782592, 1759044352,
+        446119424, 1346046976, 41955584, 104922624, 1739180032, 19610880,
+    ];
+    {
+        use opus_native::OpusDecoder;
+        use opus_native::ogg::OggOpusReader;
+        let mut reader = OggOpusReader::new(&data).expect("container");
+        let mut decoder = OpusDecoder::new(1);
+        let mut i = 0;
+        while let Some(pkt) = reader.next() {
+            let _ = decoder.decode_packet(&pkt.data).expect("packet");
+            assert_eq!(decoder.final_range(), FINAL_RANGES[i], "packet {i}");
+            i += 1;
+        }
+        assert_eq!(i, 26);
+    }
+
+    // Project the interior onto a 440 Hz sine and measure the residual.
+    let seg = &pcm[4_000..20_000];
+    let w = 2.0 * core::f64::consts::PI * 440.0 / 48_000.0;
+    let (mut cs, mut sn) = (0.0f64, 0.0f64);
+    for (i, &x) in seg.iter().enumerate() {
+        cs += f64::from(x) * (w * i as f64).cos();
+        sn += f64::from(x) * (w * i as f64).sin();
+    }
+    let m = seg.len() as f64;
+    let (a, b) = (2.0 * cs / m, 2.0 * sn / m);
+    let amp = (a * a + b * b).sqrt();
+    assert!((0.11..0.14).contains(&amp), "sine amplitude {amp}");
+
+    let (mut sig, mut noise) = (0.0f64, 0.0f64);
+    for (i, &x) in seg.iter().enumerate() {
+        let fit = a * (w * i as f64).cos() + b * (w * i as f64).sin();
+        sig += fit * fit;
+        noise += (f64::from(x) - fit) * (f64::from(x) - fit);
+    }
+    let snr_db = 10.0 * (sig / noise).log10();
+    assert!(snr_db > 20.0, "440 Hz fit SNR {snr_db:.1} dB");
+}

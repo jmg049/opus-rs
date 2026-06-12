@@ -40,7 +40,7 @@ pub mod celt;
 #[cfg(feature = "std")]
 mod decoder;
 #[cfg(feature = "std")]
-pub use decoder::OpusDecoder;
+pub use decoder::{OggDecodeError, OpusDecoder, decode_ogg_opus};
 #[cfg(feature = "experimental-codec")]
 pub mod experimental;
 #[cfg(feature = "experimental-codec")]
