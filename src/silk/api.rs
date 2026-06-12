@@ -90,6 +90,28 @@ impl SilkDecoder {
     /// outside what RFC 6716 allows) - the Opus layer validates these from
     /// the TOC.
     pub fn decode(&mut self, dec: &mut RangeDecoder, ctl: &DecControl, new_packet: bool, out: &mut Vec<i16>) {
+        self.decode_inner(dec, ctl, new_packet, false, out);
+    }
+
+    /// `silk_Decode` with `FLAG_DECODE_LBRR`: decodes the in-band FEC
+    /// (LBRR) data of this packet for the frames that carry it, concealing
+    /// the rest.
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid control parameters.
+    pub fn decode_fec(&mut self, dec: &mut RangeDecoder, ctl: &DecControl, new_packet: bool, out: &mut Vec<i16>) {
+        self.decode_inner(dec, ctl, new_packet, true, out);
+    }
+
+    fn decode_inner(
+        &mut self,
+        dec: &mut RangeDecoder,
+        ctl: &DecControl,
+        new_packet: bool,
+        fec: bool,
+        out: &mut Vec<i16>,
+    ) {
         assert!(ctl.channels_internal == 1 || ctl.channels_internal == 2);
         let fs_khz = (ctl.internal_sample_rate >> 10) + 1;
         debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
@@ -183,8 +205,9 @@ impl SilkDecoder {
                 }
             }
 
-            // Regular decoding skips all LBRR data.
-            for i in 0..n_frames_per_packet {
+            // Regular decoding skips all LBRR data; FEC decoding consumes
+            // it in the per-frame loop instead.
+            for i in 0..if fec { 0 } else { n_frames_per_packet } {
                 for n in 0..ctl.channels_internal {
                     if !self.channels[n].as_ref().expect("configured").lbrr_flags[i] {
                         continue;
@@ -224,11 +247,24 @@ impl SilkDecoder {
         let mut ms_pred_q13 = [0i32; 2];
         let mut decode_only_middle = false;
         if ctl.channels_internal == 2 {
-            ms_pred_q13 = stereo_decode_pred(dec);
             let frame_index = self.channels[0].as_ref().expect("configured").n_frames_decoded;
-            let side_vad = self.channels[1].as_ref().expect("configured").vad_flags[frame_index];
-            if !side_vad {
-                decode_only_middle = stereo_decode_mid_only(dec);
+            let coded = !fec || self.channels[0].as_ref().expect("configured").lbrr_flags[frame_index];
+            if coded {
+                ms_pred_q13 = stereo_decode_pred(dec);
+                let side = self.channels[1].as_ref().expect("configured");
+                let side_coded = if fec {
+                    side.lbrr_flags[frame_index]
+                } else {
+                    side.vad_flags[frame_index]
+                };
+                if !side_coded {
+                    decode_only_middle = stereo_decode_mid_only(dec);
+                }
+            } else {
+                ms_pred_q13 = [
+                    i32::from(self.stereo.pred_prev_q13[0]),
+                    i32::from(self.stereo.pred_prev_q13[1]),
+                ];
             }
         }
 
@@ -242,16 +278,29 @@ impl SilkDecoder {
         let mut mid = vec![0i16; frame_length + 2];
         let mut side = vec![0i16; frame_length + 2];
         let frames_decoded0 = self.channels[0].as_ref().expect("configured").n_frames_decoded;
+        let has_side = if fec {
+            !self.prev_decode_only_middle
+                || (ctl.channels_internal == 2
+                    && self.channels[1].as_ref().expect("configured").lbrr_flags[frames_decoded0])
+        } else {
+            !decode_only_middle
+        };
         for n in 0..ctl.channels_internal {
-            let has_side = !decode_only_middle;
             if n == 0 || has_side {
                 // Independent coding when no previous frame is available.
                 // (The reference computes nFramesDecoded[0] - n AFTER
                 // channel 0's counter has been incremented, so both
                 // channels effectively see the pre-loop count.)
                 let frame_index = frames_decoded0 as i32;
+                let ch_lbrr = self.channels[n].as_ref().expect("configured").lbrr_flags;
                 let cond = if frame_index <= 0 {
                     CondCoding::Independently
+                } else if fec {
+                    if ch_lbrr[frames_decoded0 - 1] {
+                        CondCoding::Conditionally
+                    } else {
+                        CondCoding::Independently
+                    }
                 } else if n > 0 && self.prev_decode_only_middle {
                     // A skipped side frame leaves the LTP state defined.
                     CondCoding::IndependentlyNoLtpScaling
@@ -260,8 +309,13 @@ impl SilkDecoder {
                 };
                 let buf = if n == 0 { &mut mid } else { &mut side };
                 let ch = self.channels[n].as_mut().expect("configured");
-                let vad_flag = ch.vad_flags[ch.n_frames_decoded];
-                ch.dec.decode_frame(dec, &mut buf[2..], vad_flag, false, cond);
+                if fec && !ch.lbrr_flags[ch.n_frames_decoded] {
+                    // No FEC for this frame: conceal it.
+                    ch.dec.decode_frame_lost(&mut buf[2..]);
+                } else {
+                    let vad_flag = ch.vad_flags[ch.n_frames_decoded];
+                    ch.dec.decode_frame(dec, &mut buf[2..], vad_flag, fec, cond);
+                }
             } else {
                 side[2..].fill(0);
             }

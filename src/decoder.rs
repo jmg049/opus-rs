@@ -101,6 +101,12 @@ impl OpusDecoder {
     ///
     /// Returns the packet-layer error for malformed packets.
     pub fn decode_packet(&mut self, data: &[u8]) -> Result<Vec<f32>, PacketError> {
+        // Payloads of 0 or 1 bytes (TOC only) signal DTX: conceal one
+        // frame of the last good packet's duration (comfort noise after
+        // the concealment fades out).
+        if data.len() <= 1 {
+            return Ok(self.decode_lost(self.last_frame_size));
+        }
         let packet = Packet::parse(data)?;
         let toc = packet.toc();
         self.stream_channels = usize::from(toc.channels());
@@ -212,6 +218,80 @@ impl OpusDecoder {
         }
         self.final_range = 0;
         out
+    }
+
+    /// Decodes the in-band FEC (LBRR) data of `data` to recover a lost
+    /// packet of `frame_size` samples per channel, like
+    /// `opus_decode(..., decode_fec=1)`: everything except the FEC'd
+    /// duration is concealed, then the LBRR frame completes it. Falls back
+    /// to plain concealment when the packet cannot carry FEC (CELT-only
+    /// modes or a shorter request).
+    ///
+    /// # Errors
+    ///
+    /// Returns the packet-layer error for malformed packets.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `frame_size` does not correspond to 2.5-60 ms at 48 kHz.
+    pub fn decode_fec(&mut self, data: &[u8], frame_size: usize) -> Result<Vec<f32>, PacketError> {
+        let packet = Packet::parse(data)?;
+        let toc = packet.toc();
+        let packet_frame_size = toc.frame_size().samples_per_channel_48k();
+
+        // No FEC possible: run plain concealment.
+        if frame_size < packet_frame_size || toc.mode() == Mode::CeltOnly || self.prev_mode == Some(Mode::CeltOnly) {
+            return Ok(self.decode_lost(frame_size));
+        }
+
+        // Conceal everything except the FEC'd duration.
+        let mut out = self.decode_lost(frame_size - packet_frame_size);
+
+        // Decode the LBRR data of the first frame.
+        self.stream_channels = usize::from(toc.channels());
+        let channels = self.channels;
+        let mode = toc.mode();
+        let mut dec = RangeDecoder::new(packet.frames()[0]);
+        let payload_size_ms = 10.max(1000 * packet_frame_size / 48000);
+        let ctl = DecControl {
+            channels_internal: self.stream_channels,
+            channels_api: channels,
+            internal_sample_rate: if mode == Mode::SilkOnly {
+                match toc.bandwidth() {
+                    Bandwidth::NarrowBand => 8000,
+                    Bandwidth::MediumBand => 12000,
+                    _ => 16000,
+                }
+            } else {
+                16000
+            },
+            api_sample_rate: 48000,
+            payload_size_ms,
+        };
+        let mut silk_out: Vec<i16> = Vec::new();
+        self.silk.decode_fec(&mut dec, &ctl, true, &mut silk_out);
+        self.last_silk_ctl = Some(ctl);
+
+        let base = out.len();
+        out.resize(base + packet_frame_size * channels, 0.0);
+        for (o, &s) in out[base..].iter_mut().zip(silk_out.iter()) {
+            *o = f32::from(s) / 32768.0;
+        }
+        // The CELT half of a hybrid frame has no FEC: conceal it.
+        if mode == Mode::Hybrid {
+            let celt_end = end_band(toc.bandwidth());
+            let pcm = self.celt.decode_lost(packet_frame_size, 17, celt_end);
+            for (o, &v) in out[base..].iter_mut().zip(pcm.iter()) {
+                *o += v;
+            }
+        }
+
+        self.final_range = dec.range_size();
+        self.prev_mode = Some(mode);
+        self.prev_redundancy = false;
+        self.prev_end = end_band(toc.bandwidth());
+        self.last_frame_size = packet_frame_size;
+        Ok(out)
     }
 
     /// `opus_decode_frame`, normal path (no FEC, no loss).
