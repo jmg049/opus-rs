@@ -5,10 +5,13 @@ A pure-Rust implementation of the [Opus audio codec](https://opus-codec.org/)
 
 **No FFI. No unsafe code. No dependencies.**
 
-> **Status: pre-release, under active development.** The decoder is complete:
-> every packet of all twelve official test vectors decodes with a bit-exact
-> final range and 82-108 dB PCM SNR against the reference decoder. Loss
-> concealment and the encoder are in progress. Nothing here is API-stable yet.
+> **Status: pre-release, under active development.** The decoder is
+> feature-complete and passes the official conformance criterion: all twelve
+> test vectors at 99.2-100% `opus_compare` quality, bit-exact final ranges on
+> every packet, sample-identical SILK PCM. Loss concealment, in-band FEC, and
+> DTX are validated sample-exact against libopus; output rates 8-48 kHz;
+> surround (multistream) files decode end to end. The encoder is next.
+> Nothing here is API-stable yet.
 
 ## Why
 
@@ -48,7 +51,8 @@ framework.
 | `packet` | §3 | TOC parsing, frame packing codes 0-3, padding, R1-R7 validation |
 | `lpc` | §4.2/§5.2 groundwork | Levinson-Durbin, LP analysis/synthesis, pitch estimation, LTP |
 | `experimental` | - | pre-conformance frame codec, mode detection, crossover, mid/side (feature `experimental-codec`) |
-| `decoder` | §4 | the Opus decoder: TOC dispatch, hybrid, redundancy, transitions - all twelve official vectors bit-exact on the final-range oracle |
+| `decoder` | §4 | the Opus decoder: TOC dispatch, hybrid, redundancy, transitions, PLC/FEC/DTX, 8-48 kHz output - all twelve official vectors bit-exact on the final-range oracle |
+| `multistream` | RFC 7845 §5.1.1 | surround layouts: self-delimited demux, N decoders, channel mapping |
 | `celt` | §4.3 | complete decoder (RFC 8251 updates included) |
 | `silk` | §4.2 | complete decoder for the normal path (PLC/CNG pending); pure SILK vectors decode sample-identically |
 | `ogg` | RFC 3533 + RFC 7845 | Ogg pages (CRC, lacing, resync), packet reassembly, `OpusHead`/`OpusTags`, granule/pre-skip/end-trim timing, stream reader + writer |
