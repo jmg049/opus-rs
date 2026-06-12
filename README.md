@@ -33,9 +33,9 @@ framework.
 - **`no_std` + `alloc`**: the `std` feature (on by default) only adds
   `std::error::Error` impls and conveniences.
 - **Zero dependencies**: nothing in the dependency tree but this crate. The
-  MDCT's inner FFT sits behind a seam: an optional feature (planned) routes it
-  through the [`spectrograms`](https://crates.io/crates/spectrograms) crate's
-  fast FFT machinery for acceleration, keeping the default build
+  MDCT's inner FFT sits behind a seam: the optional `spectrograms` feature
+  routes it through the [`spectrograms`](https://crates.io/crates/spectrograms)
+  crate's planned FFTs (~10× faster decode), keeping the default build
   dependency-free.
 
 ## Layout

@@ -23,9 +23,15 @@ std = []
 # RFC 6716 bitstream; see the `experimental` module docs. Requires `std` for
 # float math.
 experimental-codec = ["std"]
+# Accelerated FFT backend for the CELT MDCT seam, provided by the
+# `spectrograms` crate (rustfft-based plans). The default build keeps the
+# dependency-free O(n²) evaluation; decoded audio differs only in float
+# rounding (the conformance criterion is PCM quality, not bit-exact PCM).
+spectrograms = ["std", "dep:spectrograms"]
 
 [dependencies]
-# Intentionally empty. The codec core has zero runtime dependencies.
+# The codec core has zero required runtime dependencies.
+spectrograms = { version = "1.4", path = "../../rust/spectrograms", optional = true, default-features = false, features = ["realfft"] }
 
 [dev-dependencies]
 

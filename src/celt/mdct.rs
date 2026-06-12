@@ -15,10 +15,10 @@
 //! complex FFT, and a post-rotation - the rotations and windowing are
 //! codec-specific and live here; the FFT is generic. It is isolated behind
 //! [`fft_forward`]/[`fft_inverse`] so a fast backend can replace the built-in
-//! O(n²) evaluation without touching codec logic. The planned accelerated
-//! backend is the `spectrograms` crate (this project's existing fast
-//! MDCT/FFT work) behind an optional feature; the default build stays
-//! dependency-free.
+//! O(n²) evaluation without touching codec logic. The optional
+//! `spectrograms` feature does exactly that, routing through the
+//! `spectrograms` crate's planned FFTs (this project's existing fast
+//! MDCT/FFT work); the default build stays dependency-free.
 //!
 //! Conformance note: the official test vectors compare PCM with a quality
 //! threshold (`opus_compare`), not bit-exactly, so the FFT backend may vary;
@@ -55,9 +55,58 @@ impl MdctLookup {
     }
 }
 
+/// The accelerated FFT backend (feature `spectrograms`): rustfft-based
+/// complex plans from the `spectrograms` crate, cached per transform size.
+/// CELT only ever uses N/4 sizes 60/120/240/480 for the standard mode.
+#[cfg(feature = "spectrograms")]
+mod accel {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use spectrograms::{C2cPlanF32, Complex, RealFftC2cPlanF32};
+
+    std::thread_local! {
+        static PLANS: RefCell<HashMap<usize, RealFftC2cPlanF32>> = RefCell::new(HashMap::new());
+    }
+
+    /// Runs one transform over a scratch copy of `input`, writing `output`
+    /// scaled by `scale`.
+    pub fn run(input: &[(f32, f32)], output: &mut [(f32, f32)], inverse: bool, scale: f32) {
+        let mut buf: Vec<Complex<f32>> = input.iter().map(|&(re, im)| Complex::new(re, im)).collect();
+        PLANS.with(|plans| {
+            let mut plans = plans.borrow_mut();
+            let plan = plans
+                .entry(buf.len())
+                .or_insert_with(|| RealFftC2cPlanF32::new(buf.len()));
+            if inverse {
+                plan.inverse(&mut buf).expect("plan sized to buffer");
+            } else {
+                plan.forward(&mut buf).expect("plan sized to buffer");
+            }
+        });
+        for (out, c) in output.iter_mut().zip(&buf) {
+            *out = (c.re * scale, c.im * scale);
+        }
+    }
+}
+
+/// Un-normalised inverse complex FFT: `out[n] = Σ_k in[k]·e^{+2πi kn/N}`.
+#[cfg(feature = "spectrograms")]
+fn fft_inverse(input: &[(f32, f32)], output: &mut [(f32, f32)]) {
+    accel::run(input, output, true, 1.0);
+}
+
+/// Forward complex FFT scaled by `1/N` (kiss_fft's forward convention in
+/// Opus): `out[k] = (1/N)·Σ_n in[n]·e^{-2πi kn/N}`.
+#[cfg(feature = "spectrograms")]
+fn fft_forward(input: &[(f32, f32)], output: &mut [(f32, f32)]) {
+    accel::run(input, output, false, 1.0 / input.len() as f32);
+}
+
 /// Un-normalised inverse complex FFT: `out[n] = Σ_k in[k]·e^{+2πi kn/N}`.
 ///
 /// The seam for an accelerated backend; the built-in evaluation is O(n²).
+#[cfg(not(feature = "spectrograms"))]
 fn fft_inverse(input: &[(f32, f32)], output: &mut [(f32, f32)]) {
     let n = input.len();
     let step = 2.0 * core::f64::consts::PI / n as f64;
@@ -76,6 +125,7 @@ fn fft_inverse(input: &[(f32, f32)], output: &mut [(f32, f32)]) {
 
 /// Forward complex FFT scaled by `1/N` (kiss_fft's forward convention in
 /// Opus): `out[k] = (1/N)·Σ_n in[n]·e^{-2πi kn/N}`.
+#[cfg(not(feature = "spectrograms"))]
 fn fft_forward(input: &[(f32, f32)], output: &mut [(f32, f32)]) {
     let n = input.len();
     let step = 2.0 * core::f64::consts::PI / n as f64;
