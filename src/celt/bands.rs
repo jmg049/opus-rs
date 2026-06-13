@@ -99,7 +99,7 @@ fn isqrt32(mut val: u32) -> u32 {
 }
 
 /// In-place Haar transform across `stride`-interleaved pairs (`haar1`).
-fn haar1(x: &mut [f32], n0: usize, stride: usize) {
+pub(crate) fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     const INV_SQRT2: f32 = core::f32::consts::FRAC_1_SQRT_2;
     let n0 = n0 >> 1;
     for i in 0..stride {

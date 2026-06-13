@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use crate::range::RangeEncoder;
 
 use super::bands::encode::quant_all_bands_enc;
+use super::bands::haar1;
 use super::decoder::TF_SELECT_TABLE;
 use super::energy::EnergyState;
 use super::laplace::ec_laplace_encode;
@@ -54,6 +55,11 @@ pub struct CeltEncoder {
     consec_transient: u32,
     /// Whether the last frame was coded with short blocks (diagnostic).
     last_transient: bool,
+    /// Recursively averaged tonality metric (`tonal_average`) for the
+    /// spreading decision.
+    tonal_average: i32,
+    /// The previous frame's spreading decision (`spread_decision`).
+    spread_decision: i32,
     /// Range state of the last encoded frame (the bit-exactness oracle).
     final_range: u32,
     mdct: MdctLookup,
@@ -88,6 +94,8 @@ impl CeltEncoder {
             frames: 0,
             consec_transient: 0,
             last_transient: false,
+            tonal_average: 256,
+            spread_decision: Spread::Normal as i32,
             final_range: 0,
             mdct: MdctLookup::new(1920),
         }
@@ -132,10 +140,10 @@ impl CeltEncoder {
         }
 
         // Transient decision (`transient_analysis`); the flag needs 3 bits.
-        let (is_transient, tf_estimate) = if lm > 0 && enc.tell() + 3 <= total_bits {
+        let (is_transient, tf_estimate, tf_chan) = if lm > 0 && enc.tell() + 3 <= total_bits {
             transient_analysis(&inputs, in_len, channels)
         } else {
-            (false, 0.0)
+            (false, 0.0, 0)
         };
 
         // Forward MDCT(s) per channel, then band energies (log domain
@@ -199,9 +207,10 @@ impl CeltEncoder {
             }
         }
 
-        // Dynalloc boost targets (uses the previous frame's energies, so
-        // it must run before coarse-energy quantisation overwrites them).
-        let boost_targets = dynalloc_analysis(
+        // Dynalloc analysis (uses the previous frame's energies, so it must
+        // run before coarse-energy quantisation overwrites them); yields the
+        // boost targets plus the importance/spread weights for tf and spread.
+        let dyn_an = dynalloc_analysis(
             &band_log_e,
             &band_log_e2,
             &self.energy.old_ebands,
@@ -212,6 +221,27 @@ impl CeltEncoder {
             nb_bytes,
             is_transient,
         );
+        let boost_targets = dyn_an.offsets;
+
+        // Per-band time/frequency resolution (`tf_analysis`), enabled above a
+        // low byte threshold. The result is the raw 0/1 flags plus tf_select.
+        let n0 = n;
+        let (mut tf_res, tf_select) = if nb_bytes >= 15 * channels && lm > 0 {
+            let lambda = 80.max(20480 / nb_bytes as i32 + 2);
+            tf_analysis(
+                end,
+                is_transient,
+                lambda,
+                &x,
+                n0,
+                lm,
+                tf_estimate,
+                tf_chan,
+                &dyn_an.importance,
+            )
+        } else {
+            ([i32::from(is_transient); NB_EBANDS], usize::from(is_transient))
+        };
 
         // The CBR-equivalent rate in bits/s, for trim and dynalloc tuning.
         let equiv_rate =
@@ -240,38 +270,60 @@ impl CeltEncoder {
         let mut error = [[0.0f32; NB_EBANDS]; 2];
         self.quant_coarse_energy(&mut enc, start, end, &band_log_e, &mut error, intra, lm, total_bits);
 
-        // Time-frequency: no per-band changes (`tf_encode` with all-zero
-        // flags and tf_select 0); the effective per-band tf_change still
-        // comes from the table - 3 for a default transient frame.
-        let tf_res = {
+        // Time-frequency coding (`tf_encode`): code each band's flag as the
+        // change from the previous band, code tf_select when it matters, and
+        // map the flags through the table to per-band tf_change values.
+        {
             let mut budget = total_bits;
             let mut tell = enc.tell();
             let mut logp: u32 = if is_transient { 2 } else { 4 };
             let tf_select_rsv = lm > 0 && tell + logp < budget;
             budget -= u32::from(tf_select_rsv);
-            for _ in start..end {
+            let mut tf_changed = false;
+            let mut curr = 0i32;
+            for r in tf_res.iter_mut().take(end).skip(start) {
                 if tell + logp <= budget {
-                    enc.encode_bit_logp(false, logp);
+                    enc.encode_bit_logp(*r != curr, logp);
                     tell = enc.tell();
+                    curr = *r;
+                    tf_changed |= curr != 0;
+                } else {
+                    *r = curr;
                 }
                 logp = if is_transient { 4 } else { 5 };
             }
-            // tf_select is only coded when the two candidate tables differ
-            // for the coded flags (tf_changed == 0 here).
             let base = 4 * usize::from(is_transient);
-            if tf_select_rsv && TF_SELECT_TABLE[lm][base] != TF_SELECT_TABLE[lm][base + 2] {
-                enc.encode_bit_logp(false, 1);
-            }
-            let mut tf_res = [0i32; NB_EBANDS];
+            // Only code tf_select if it would make a difference.
+            let tf_select = if tf_select_rsv
+                && TF_SELECT_TABLE[lm][base + usize::from(tf_changed)]
+                    != TF_SELECT_TABLE[lm][base + 2 + usize::from(tf_changed)]
+            {
+                enc.encode_bit_logp(tf_select != 0, 1);
+                tf_select
+            } else {
+                0
+            };
             for r in tf_res.iter_mut().take(end).skip(start) {
-                *r = TF_SELECT_TABLE[lm][base];
+                *r = TF_SELECT_TABLE[lm][base + 2 * tf_select + *r as usize];
             }
-            tf_res
-        };
+        }
 
-        // Spreading: normal.
+        // Spreading decision.
+        let mut spread = Spread::Normal;
         if enc.tell() + 4 <= total_bits {
-            enc.encode_icdf(Spread::Normal as usize, &SPREAD_ICDF, 5);
+            let s = spreading_decision(
+                &x,
+                n0,
+                &mut self.tonal_average,
+                self.spread_decision,
+                end,
+                channels,
+                m,
+                &dyn_an.spread_weight,
+            );
+            self.spread_decision = s;
+            spread = Spread::from_raw(s as u32);
+            enc.encode_icdf(s as usize, &SPREAD_ICDF, 5);
         }
 
         // Dynamic allocation: code each band's boost as a run of `1` flags
@@ -365,7 +417,7 @@ impl CeltEncoder {
             if channels == 2 { Some(ys) } else { None },
             &alloc.shape_bits,
             is_transient,
-            Spread::Normal,
+            spread,
             alloc.dual_stereo,
             alloc.intensity,
             &tf_res,
@@ -568,9 +620,10 @@ impl CeltEncoder {
 /// frame energy against the harmonic mean of the masked energy - a
 /// bitrate-normalised temporal noise-to-mask ratio. `inputs` is the planar
 /// per-channel pre-emphasised signal including the overlap (`len` samples
-/// per channel). Returns `(is_transient, tf_estimate)`, the latter an
-/// arbitrary VBR/trim metric derived from the mask metric.
-fn transient_analysis(inputs: &[f32], len: usize, channels: usize) -> (bool, f32) {
+/// per channel). Returns `(is_transient, tf_estimate, tf_chan)`: the
+/// transient flag, an arbitrary VBR/trim metric, and the channel with the
+/// strongest transient (the one `tf_analysis` examines).
+fn transient_analysis(inputs: &[f32], len: usize, channels: usize) -> (bool, f32, usize) {
     /// `inv_table`: 6*64/x, trained on real data to minimise average error.
     const INV_TABLE: [u8; 128] = [
         255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25, 23, 22, 21, 20, 19, 18, 17, 16, 16, 15, 15,
@@ -584,6 +637,7 @@ fn transient_analysis(inputs: &[f32], len: usize, channels: usize) -> (bool, f32
 
     let len2 = len / 2;
     let mut mask_metric = 0i32;
+    let mut tf_chan = 0usize;
     let mut tmp = vec![0.0f32; len];
     for c in 0..channels {
         let input = &inputs[c * len..(c + 1) * len];
@@ -632,13 +686,16 @@ fn transient_analysis(inputs: &[f32], len: usize, channels: usize) -> (bool, f32
         }
         // Normalise for the 1/4 sampling and the factor 6 in the table.
         let unmask = 64 * unmask * 4 / (6 * (len2 as i32 - 17));
-        mask_metric = mask_metric.max(unmask);
+        if unmask > mask_metric {
+            tf_chan = c;
+            mask_metric = unmask;
+        }
     }
     let is_transient = mask_metric > 200;
     // Arbitrary metric for VBR boost and trim (float build).
     let tf_max = 0.0f32.max((27.0 * mask_metric as f32).sqrt() - 42.0);
     let tf_estimate = 0.0f32.max(0.0069 * 163.0f32.min(tf_max) - 0.139).sqrt();
-    (is_transient, tf_estimate)
+    (is_transient, tf_estimate, tf_chan)
 }
 
 /// `dynalloc_analysis` (float build, non-LFE, no surround, no analysis
@@ -648,6 +705,17 @@ fn transient_analysis(inputs: &[f32], len: usize, channels: usize) -> (bool, f32
 /// long-block variant (equal to `band_log_e` for non-transient frames),
 /// and `old_ebands` the previous frame's energies. Boosts only kick in
 /// once the budget is large enough.
+/// The per-band analysis outputs shared with the allocator and the
+/// spreading/tf decisions.
+struct Dynalloc {
+    /// Per-band boost *targets* (count of dynalloc increments to code).
+    offsets: [i32; NB_EBANDS],
+    /// Per-band perceptual importance (`importance`), for `tf_analysis`.
+    importance: [i32; NB_EBANDS],
+    /// Per-band spreading weight (`spread_weight`), for `spreading_decision`.
+    spread_weight: [i32; NB_EBANDS],
+}
+
 #[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
 #[allow(clippy::needless_range_loop, reason = "band indices mirror the reference loops")]
 fn dynalloc_analysis(
@@ -660,10 +728,12 @@ fn dynalloc_analysis(
     lm: usize,
     effective_bytes: usize,
     is_transient: bool,
-) -> [i32; NB_EBANDS] {
+) -> Dynalloc {
     /// `lsb_depth` for float input.
     const LSB_DEPTH: f32 = 24.0;
     let mut offsets = [0i32; NB_EBANDS];
+    let mut importance = [13i32; NB_EBANDS];
+    let mut spread_weight = [32i32; NB_EBANDS];
 
     // Noise floor: eMeans, depth, band width and the pre-emphasis tilt.
     let mut noise_floor = [0.0f32; NB_EBANDS];
@@ -671,9 +741,47 @@ fn dynalloc_analysis(
         *nf = 0.0625 * f32::from(LOG_N[i]) + 0.5 + (9.0 - LSB_DEPTH) - E_MEANS[i] + 0.0062 * ((i + 5) * (i + 5)) as f32;
     }
 
+    // The depth of the loudest band above the noise floor.
+    let mut max_depth = -31.9f32;
+    for c in 0..channels {
+        for i in 0..end {
+            max_depth = max_depth.max(band_log_e[c][i] - noise_floor[i]);
+        }
+    }
+
+    // A simple masking model giving each band a spreading weight, so the
+    // spreading decision ignores fully masked bands.
+    {
+        let mut mask = [0.0f32; NB_EBANDS];
+        let mut sig = [0.0f32; NB_EBANDS];
+        for i in 0..end {
+            mask[i] = band_log_e[0][i] - noise_floor[i];
+            if channels == 2 {
+                mask[i] = mask[i].max(band_log_e[1][i] - noise_floor[i]);
+            }
+            sig[i] = mask[i];
+        }
+        for i in 1..end {
+            mask[i] = mask[i].max(mask[i - 1] - 2.0);
+        }
+        for i in (0..end - 1).rev() {
+            mask[i] = mask[i].max(mask[i + 1] - 3.0);
+        }
+        for i in 0..end {
+            // SMR is never more than 72 dB below the peak nor below the floor.
+            let smr = sig[i] - 0.0f32.max(max_depth - 12.0).max(mask[i]);
+            let shift = (-(0.5 + smr).floor() as i32).clamp(0, 5);
+            spread_weight[i] = 32 >> shift;
+        }
+    }
+
     // The gate: enable at ~24 kb/s for 20 ms, ~96 kb/s for 2.5 ms.
     if effective_bytes < 30 + 5 * lm {
-        return offsets;
+        return Dynalloc {
+            offsets,
+            importance,
+            spread_weight,
+        };
     }
 
     let mut follower = [[0.0f32; NB_EBANDS]; 2];
@@ -732,6 +840,11 @@ fn dynalloc_analysis(
         }
     }
 
+    // Perceptual importance (before the dynalloc-specific scaling below).
+    for i in start..end {
+        importance[i] = (0.5 + 13.0 * celt_exp2(follower[0][i].min(4.0))).floor() as i32;
+    }
+
     // For non-transient CBR frames, halve the dynalloc contribution.
     if !is_transient {
         for i in start..end {
@@ -771,7 +884,26 @@ fn dynalloc_analysis(
         offsets[i] = boost.min(caps[i]);
         tot_boost += boost_bits;
     }
-    offsets
+    Dynalloc {
+        offsets,
+        importance,
+        spread_weight,
+    }
+}
+
+/// `celt_exp2` (float build): the reference's polynomial 2^x approximation,
+/// reproduced so `importance` matches the reference bit-for-bit-ish.
+#[allow(clippy::excessive_precision, reason = "verbatim reference polynomial constants")]
+fn celt_exp2(x: f32) -> f32 {
+    let integer = x.floor();
+    if integer < -50.0 {
+        return 0.0;
+    }
+    let frac = x - integer;
+    let res = 0.999_925_22 + frac * (0.695_833_54 + frac * (0.226_067_16 + 0.078_024_52 * frac));
+    // Scale by 2^integer via the IEEE-754 exponent field.
+    let bits = (res.to_bits() as i32 + ((integer as i32) << 23)) & 0x7fff_ffff;
+    f32::from_bits(bits as u32)
 }
 
 /// `median_of_5` (encoder helper).
@@ -834,4 +966,180 @@ fn alloc_trim_analysis(
     trim -= 2.0 * tf_estimate;
 
     (trim + 0.5).floor().clamp(0.0, 10.0) as i32
+}
+
+/// `spreading_decision` (float build, no analysis module, `update_hf`
+/// disabled since there is no post-filter): chooses the PVQ spreading from a
+/// rough CDF of the normalised band shapes, weighted by `spread_weight`, and
+/// recursively averaged in `tonal_average` with hysteresis from
+/// `last_decision`. `x` is the planar normalised spectrum.
+#[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
+fn spreading_decision(
+    x: &[f32],
+    n0: usize,
+    tonal_average: &mut i32,
+    last_decision: i32,
+    end: usize,
+    channels: usize,
+    m: usize,
+    spread_weight: &[i32; NB_EBANDS],
+) -> i32 {
+    if m * (EBANDS[end] - EBANDS[end - 1]) as usize <= 8 {
+        return Spread::None as i32;
+    }
+    let mut sum = 0i32;
+    let mut nb_bands = 0i32;
+    for c in 0..channels {
+        for i in 0..end {
+            let lo = c * n0 + m * EBANDS[i] as usize;
+            let n = m * (EBANDS[i + 1] - EBANDS[i]) as usize;
+            if n <= 8 {
+                continue;
+            }
+            let band = &x[lo..lo + n];
+            // Rough CDF of |x[j]| via three energy thresholds.
+            let mut tcount = [0i32; 3];
+            for &v in band {
+                let x2n = v * v * n as f32;
+                tcount[0] += i32::from(x2n < 0.25);
+                tcount[1] += i32::from(x2n < 0.0625);
+                tcount[2] += i32::from(x2n < 0.015_625);
+            }
+            let nn = n as i32;
+            let tmp = i32::from(2 * tcount[2] >= nn) + i32::from(2 * tcount[1] >= nn) + i32::from(2 * tcount[0] >= nn);
+            sum += tmp * spread_weight[i];
+            nb_bands += spread_weight[i];
+        }
+    }
+    let nb_bands = nb_bands.max(1);
+    let mut sum = (sum << 8) / nb_bands;
+    // Recursive averaging, then hysteresis around the previous decision.
+    sum = (sum + *tonal_average) >> 1;
+    *tonal_average = sum;
+    sum = (3 * sum + (((3 - last_decision) << 7) + 64) + 2) >> 2;
+    if sum < 80 {
+        Spread::Aggressive as i32
+    } else if sum < 256 {
+        Spread::Normal as i32
+    } else if sum < 384 {
+        Spread::Light as i32
+    } else {
+        Spread::None as i32
+    }
+}
+
+/// L1 norm of a band, biased toward good frequency resolution (`l1_metric`).
+fn l1_metric(tmp: &[f32], lm: i32, bias: f32) -> f32 {
+    let l1: f32 = tmp.iter().map(|v| v.abs()).sum();
+    l1 + l1 * (lm as f32 * bias)
+}
+
+/// `tf_analysis` (float build): per band, find the time/frequency split that
+/// minimises the L1 metric (`metric`), then a Viterbi pass weighted by
+/// `importance` and the switching cost `lambda` chooses the per-band tf
+/// resolution flags and `tf_select`. Returns `(tf_res, tf_select)` with the
+/// raw 0/1 flags (the caller maps them through `TF_SELECT_TABLE`).
+#[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
+#[allow(clippy::needless_range_loop, reason = "band indices mirror the reference loops")]
+fn tf_analysis(
+    end: usize,
+    is_transient: bool,
+    lambda: i32,
+    x: &[f32],
+    n0: usize,
+    lm: usize,
+    tf_estimate: f32,
+    tf_chan: usize,
+    importance: &[i32; NB_EBANDS],
+) -> ([i32; NB_EBANDS], usize) {
+    let bias = 0.04 * (-0.25f32).max(0.5 - tf_estimate);
+    let mut metric = [0i32; NB_EBANDS];
+    let mut path0 = [0i32; NB_EBANDS];
+    let mut path1 = [0i32; NB_EBANDS];
+
+    for i in 0..end {
+        let n = (EBANDS[i + 1] - EBANDS[i]) as usize * (1 << lm);
+        let narrow = (EBANDS[i + 1] - EBANDS[i]) == 1;
+        let lo = tf_chan * n0 + (EBANDS[i] as usize) * (1 << lm);
+        let mut tmp = x[lo..lo + n].to_vec();
+        let mut best_l1 = l1_metric(&tmp, if is_transient { lm as i32 } else { 0 }, bias);
+        let mut best_level = 0i32;
+        // The -1 (recombine) case for transients.
+        if is_transient && !narrow {
+            let mut tmp1 = tmp.clone();
+            haar1(&mut tmp1, n >> lm, 1 << lm);
+            let l1 = l1_metric(&tmp1, lm as i32 + 1, bias);
+            if l1 < best_l1 {
+                best_l1 = l1;
+                best_level = -1;
+            }
+        }
+        let levels = lm + usize::from(!(is_transient || narrow));
+        for k in 0..levels {
+            let b = if is_transient {
+                lm as i32 - k as i32 - 1
+            } else {
+                k as i32 + 1
+            };
+            haar1(&mut tmp, n >> k, 1 << k);
+            let l1 = l1_metric(&tmp, b, bias);
+            if l1 < best_l1 {
+                best_l1 = l1;
+                best_level = k as i32 + 1;
+            }
+        }
+        // Q1 metric so a narrow band can sit at the -0.5 mid-point.
+        metric[i] = if is_transient { 2 * best_level } else { -2 * best_level };
+        if narrow && (metric[i] == 0 || metric[i] == -2 * lm as i32) {
+            metric[i] -= 1;
+        }
+    }
+
+    let tf_tab = &TF_SELECT_TABLE[lm];
+    let base = 4 * usize::from(is_transient);
+    let cost = |sel: usize, flag: usize, i: usize| -> i32 {
+        importance[i] * (metric[i] - 2 * tf_tab[base + 2 * sel + flag]).abs()
+    };
+
+    // Pick tf_select by comparing the two candidate tables' total cost.
+    let mut selcost = [0i32; 2];
+    for sel in 0..2 {
+        let mut cost0 = cost(sel, 0, 0);
+        let mut cost1 = cost(sel, 1, 0) + if is_transient { 0 } else { lambda };
+        for i in 1..end {
+            let curr0 = cost0.min(cost1 + lambda);
+            let curr1 = (cost0 + lambda).min(cost1);
+            cost0 = curr0 + cost(sel, 0, i);
+            cost1 = curr1 + cost(sel, 1, i);
+        }
+        selcost[sel] = cost0.min(cost1);
+    }
+    // Only allow tf_select=1 for transients (the reference's conservatism).
+    let tf_select = usize::from(selcost[1] < selcost[0] && is_transient);
+
+    // Viterbi forward pass recording the back-pointers.
+    let mut cost0 = cost(tf_select, 0, 0);
+    let mut cost1 = cost(tf_select, 1, 0) + if is_transient { 0 } else { lambda };
+    for i in 1..end {
+        let (curr0, p0) = if cost0 < cost1 + lambda {
+            (cost0, 0)
+        } else {
+            (cost1 + lambda, 1)
+        };
+        let (curr1, p1) = if cost0 + lambda < cost1 {
+            (cost0 + lambda, 0)
+        } else {
+            (cost1, 1)
+        };
+        path0[i] = p0;
+        path1[i] = p1;
+        cost0 = curr0 + cost(tf_select, 0, i);
+        cost1 = curr1 + cost(tf_select, 1, i);
+    }
+    let mut tf_res = [0i32; NB_EBANDS];
+    tf_res[end - 1] = i32::from(cost0 >= cost1);
+    for i in (0..end - 1).rev() {
+        tf_res[i] = if tf_res[i + 1] == 1 { path1[i + 1] } else { path0[i + 1] };
+    }
+    (tf_res, tf_select)
 }
