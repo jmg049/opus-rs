@@ -22,6 +22,7 @@ use super::energy::EnergyState;
 use super::laplace::ec_laplace_encode;
 use super::mdct::MdctLookup;
 use super::modes::{BETA_COEF, BETA_INTRA, E_MEANS, E_PROB_MODEL, EBANDS, LOG_N, MAX_FINE_BITS, NB_EBANDS, PRED_COEF};
+use super::pitch::{COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD, pitch_downsample, pitch_search, remove_doubling};
 use super::rate::{AllocEc, BITRES, compute_allocation, init_caps};
 use super::tables::WINDOW120;
 use super::vq::Spread;
@@ -60,6 +61,16 @@ pub struct CeltEncoder {
     tonal_average: i32,
     /// The previous frame's spreading decision (`spread_decision`).
     spread_decision: i32,
+    /// Pre-filter history (`prefilter_mem`): the last `COMBFILTER_MAXPERIOD`
+    /// pre-emphasised samples per channel.
+    prefilter_mem: [Vec<f32>; 2],
+    /// The previous frame's pre-filter period and gain (for continuity).
+    prefilter_period: usize,
+    prefilter_gain: f32,
+    /// The most recent pre-filter decision (diagnostic; not yet applied to
+    /// the signal or coded - see [`CeltEncoder::last_pitch`]).
+    last_pitch: usize,
+    last_pitch_gain: f32,
     /// Range state of the last encoded frame (the bit-exactness oracle).
     final_range: u32,
     mdct: MdctLookup,
@@ -96,6 +107,11 @@ impl CeltEncoder {
             last_transient: false,
             tonal_average: 256,
             spread_decision: Spread::Normal as i32,
+            prefilter_mem: [vec![0.0; COMBFILTER_MAXPERIOD], vec![0.0; COMBFILTER_MAXPERIOD]],
+            prefilter_period: COMBFILTER_MINPERIOD,
+            prefilter_gain: 0.0,
+            last_pitch: COMBFILTER_MINPERIOD,
+            last_pitch_gain: 0.0,
             final_range: 0,
             mdct: MdctLookup::new(1920),
         }
@@ -145,6 +161,11 @@ impl CeltEncoder {
         } else {
             (false, 0.0, 0)
         };
+
+        // Pitch pre-filter *analysis* (the decision and state only; the comb
+        // filter and post-filter bitstream coding land in a follow-up, so
+        // the bitstream still codes the post-filter off below).
+        self.prefilter_analysis(&inputs, in_len, n, channels, nb_bytes);
 
         // Forward MDCT(s) per channel, then band energies (log domain
         // relative to eMeans) and unit-norm band shapes. `x` is planar.
@@ -468,6 +489,94 @@ impl CeltEncoder {
     #[must_use]
     pub const fn last_transient(&self) -> bool {
         self.last_transient
+    }
+
+    /// The pitch period (samples) and gain the pre-filter analysis chose for
+    /// the last frame. Currently informational - the comb filter and its
+    /// post-filter bitstream coding are not yet applied.
+    #[must_use]
+    pub const fn last_pitch(&self) -> (usize, f32) {
+        (self.last_pitch, self.last_pitch_gain)
+    }
+
+    /// Pitch pre-filter analysis (`run_prefilter`, decision path): estimates
+    /// the pitch period/gain, applies the gain threshold and gain
+    /// quantisation, advances the pre-filter history, and records the
+    /// decision. The comb filter itself is not yet applied.
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "channel index also addresses prefilter_mem/inputs"
+    )]
+    fn prefilter_analysis(&mut self, inputs: &[f32], in_len: usize, n: usize, channels: usize, nb_bytes: usize) {
+        // pre[c] = [prefilter history | this frame's new samples].
+        let pre_len = COMBFILTER_MAXPERIOD + n;
+        let mut pre = [vec![0.0f32; pre_len], vec![0.0f32; pre_len]];
+        for c in 0..channels {
+            pre[c][..COMBFILTER_MAXPERIOD].copy_from_slice(&self.prefilter_mem[c]);
+            pre[c][COMBFILTER_MAXPERIOD..].copy_from_slice(&inputs[c * in_len + OVERLAP..c * in_len + OVERLAP + n]);
+        }
+
+        let enabled = nb_bytes > 12 * channels;
+        let (pitch_index, mut gain1) = if enabled {
+            let refs: Vec<&[f32]> = pre[..channels].iter().map(Vec::as_slice).collect();
+            let x_lp = pitch_downsample(&refs, pre_len);
+            let max_pitch = COMBFILTER_MAXPERIOD - 3 * COMBFILTER_MINPERIOD;
+            let coarse = pitch_search(&x_lp[COMBFILTER_MAXPERIOD >> 1..], &x_lp, n, max_pitch);
+            let mut pitch_index = COMBFILTER_MAXPERIOD - coarse;
+            let (gain, refined) = remove_doubling(
+                &x_lp,
+                COMBFILTER_MAXPERIOD,
+                COMBFILTER_MINPERIOD,
+                n,
+                pitch_index,
+                self.prefilter_period,
+                self.prefilter_gain,
+            );
+            pitch_index = refined.min(COMBFILTER_MAXPERIOD - 2);
+            (pitch_index, 0.7 * gain)
+        } else {
+            (COMBFILTER_MINPERIOD, 0.0)
+        };
+
+        // Gain threshold for enabling the (post-)filter, adjusted by rate and
+        // continuity.
+        let mut pf_threshold = 0.2f32;
+        if (pitch_index as i32 - self.prefilter_period as i32).abs() * 10 > pitch_index as i32 {
+            pf_threshold += 0.2;
+        }
+        if nb_bytes < 25 {
+            pf_threshold += 0.1;
+        }
+        if nb_bytes < 35 {
+            pf_threshold += 0.1;
+        }
+        if self.prefilter_gain > 0.4 {
+            pf_threshold -= 0.1;
+        }
+        if self.prefilter_gain > 0.55 {
+            pf_threshold -= 0.1;
+        }
+        pf_threshold = pf_threshold.max(0.2);
+        if gain1 < pf_threshold {
+            gain1 = 0.0;
+        } else {
+            // Snap to the previous gain to avoid needless changes, then
+            // quantise to one of eight levels.
+            if (gain1 - self.prefilter_gain).abs() < 0.1 {
+                gain1 = self.prefilter_gain;
+            }
+            let qg = ((0.5 + gain1 * 32.0 / 3.0).floor() as i32 - 1).clamp(0, 7);
+            gain1 = 0.093_75 * (qg + 1) as f32;
+        }
+
+        // Advance the pre-filter history (new = last MAXPERIOD of pre[c]).
+        for c in 0..channels {
+            self.prefilter_mem[c].copy_from_slice(&pre[c][n..n + COMBFILTER_MAXPERIOD]);
+        }
+        self.prefilter_period = pitch_index.max(COMBFILTER_MINPERIOD);
+        self.prefilter_gain = gain1;
+        self.last_pitch = pitch_index;
+        self.last_pitch_gain = gain1;
     }
 
     /// `quant_coarse_energy` (float build): time/frequency-predicted,

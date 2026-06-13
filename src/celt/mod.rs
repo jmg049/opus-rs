@@ -33,6 +33,7 @@ pub mod energy;
 pub mod laplace;
 pub mod mdct;
 pub mod modes;
+pub(crate) mod pitch;
 pub(crate) mod plc;
 pub mod rate;
 pub mod tables;
