@@ -78,6 +78,11 @@ pub struct CeltEncoder {
     /// The previous frame's intensity-stereo band (`intensity`), for the
     /// hysteresis decision.
     intensity: usize,
+    /// Target bitrate in bits/s for VBR (`None` = CBR, fill `nb_bytes`).
+    target_bitrate: Option<u32>,
+    /// The previous frame's coded-band count (`lastCodedBands`), an input to
+    /// the VBR target.
+    last_coded_bands: usize,
     /// Pre-filter history (`prefilter_mem`): the last `COMBFILTER_MAXPERIOD`
     /// pre-emphasised samples per channel.
     prefilter_mem: [Vec<f32>; 2],
@@ -128,6 +133,8 @@ impl CeltEncoder {
             tonal_average: 256,
             spread_decision: Spread::Normal as i32,
             intensity: 0,
+            target_bitrate: None,
+            last_coded_bands: 0,
             prefilter_mem: [vec![0.0; COMBFILTER_MAXPERIOD], vec![0.0; COMBFILTER_MAXPERIOD]],
             prefilter_period: COMBFILTER_MINPERIOD,
             prefilter_gain: 0.0,
@@ -483,6 +490,39 @@ impl CeltEncoder {
             (end, false)
         };
 
+        // Variable bitrate: choose this frame's byte count from its bit
+        // target and shrink the range coder before allocation. (The header
+        // and energy were coded against the original budget, exactly as the
+        // reference does - safe because their budget checks only bite near
+        // exhaustion, far from the chosen size.)
+        let mut nb_bytes = nb_bytes;
+        if let Some(bitrate) = self.target_bitrate {
+            let bitrate = bitrate as i32;
+            // Cap per frame size (the allocator can't exceed ~510 kb/s).
+            nb_bytes = nb_bytes.min(1275 >> (3 - lm));
+            let vbr_rate = ((i64::from(bitrate) * n as i64) / 6000) as i32; // 8th bits/frame
+            let base_target = vbr_rate - ((40 * channels as i32 + 20) << BITRES);
+            let mut target = i64::from(compute_vbr(
+                base_target,
+                lm,
+                channels,
+                bitrate,
+                self.last_coded_bands,
+                intensity,
+                0.0,
+                dyn_an.tot_boost,
+                tf_estimate,
+                dyn_an.max_depth,
+                0.0,
+            ));
+            let tell = i64::from(enc.tell_frac());
+            target += tell;
+            let min_allowed = ((tell + total_boost + ((1 << (BITRES + 3)) - 1)) >> (BITRES + 3)) + 2;
+            let nb_avail = ((target + (1 << (BITRES + 2))) >> (BITRES + 3)).clamp(min_allowed, nb_bytes as i64);
+            nb_bytes = nb_avail as usize;
+            enc.shrink(nb_bytes);
+        }
+
         // The implicit allocation (shared with the decoder).
         let mut bits = (((nb_bytes * 8) << 3) as i32) - enc.tell_frac() as i32 - 1;
         let anti_collapse_rsv = if is_transient && lm >= 2 && bits >= ((lm as i32 + 2) << 3) {
@@ -507,6 +547,7 @@ impl CeltEncoder {
             channels,
             lm,
         );
+        self.last_coded_bands = alloc.coded_bands;
 
         // Fine energy.
         self.quant_fine_energy(&mut enc, start, end, &mut error, &alloc.fine_quant);
@@ -575,6 +616,14 @@ impl CeltEncoder {
     #[must_use]
     pub const fn final_range(&self) -> u32 {
         self.final_range
+    }
+
+    /// Sets the VBR target bitrate in bits/s (`None` restores CBR, which
+    /// fills the `nb_bytes` budget exactly). In VBR the `nb_bytes` passed to
+    /// `encode_frame*` is an upper bound; each frame is shrunk to its own
+    /// target.
+    pub const fn set_target_bitrate(&mut self, bitrate: Option<u32>) {
+        self.target_bitrate = bitrate;
     }
 
     /// Whether the last frame was detected as a transient and coded with
@@ -1016,6 +1065,67 @@ fn comb_filter_prefilter(
 /// long-block variant (equal to `band_log_e` for non-transient frames),
 /// and `old_ebands` the previous frame's energies. Boosts only kick in
 /// once the budget is large enough.
+/// `compute_vbr` (float build, no analysis/surround/lfe): the per-frame bit
+/// target in 8th bits, boosted by dynalloc and transients, reduced by the
+/// stereo-saving estimate, then floored and capped at twice the base. This
+/// is the unconstrained-VBR target; the reservoir/drift logic is only used
+/// for constrained VBR, which this encoder does not offer yet.
+#[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
+fn compute_vbr(
+    base_target: i32,
+    lm: usize,
+    channels: usize,
+    bitrate: i32,
+    last_coded_bands: usize,
+    intensity: usize,
+    stereo_saving: f32,
+    tot_boost: i32,
+    tf_estimate: f32,
+    max_depth: f32,
+    temporal_vbr: f32,
+) -> i32 {
+    let coded_bands = if last_coded_bands == 0 {
+        NB_EBANDS
+    } else {
+        last_coded_bands
+    };
+    let mut coded_bins = i64::from(i32::from(EBANDS[coded_bands]) << lm);
+    if channels == 2 {
+        coded_bins += i64::from(i32::from(EBANDS[intensity.min(coded_bands)]) << lm);
+    }
+    let mut target = i64::from(base_target);
+
+    // Stereo savings (a smaller target when the channels are coherent).
+    if channels == 2 {
+        let coded_stereo_bands = intensity.min(coded_bands);
+        let coded_stereo_dof = i64::from(i32::from(EBANDS[coded_stereo_bands]) << lm) - coded_stereo_bands as i64;
+        let max_frac = 0.8 * coded_stereo_dof as f32 / coded_bins as f32;
+        let stereo_saving = stereo_saving.min(1.0);
+        let reduce = (max_frac * target as f32).min((stereo_saving - 0.1) * (coded_stereo_dof << BITRES) as f32);
+        target -= reduce as i64;
+    }
+
+    // Dynalloc boost (minus the average for calibration) and transient boost.
+    target += i64::from(tot_boost - (19 << lm));
+    let tf_calibration = 0.044f32;
+    target += (2.0 * (tf_estimate - tf_calibration) * target as f32) as i64;
+
+    // Rate floor from the band depth (rarely binds at sane bitrates).
+    let bins = i64::from(i32::from(EBANDS[NB_EBANDS - 2]) << lm);
+    let mut floor_depth = (((channels as i64 * bins) << BITRES) as f32 * max_depth) as i64;
+    floor_depth = floor_depth.max(target >> 2);
+    target = target.min(floor_depth);
+
+    // Temporal-VBR boost at lower rates (off when temporal_vbr is 0).
+    if tf_estimate < 0.2 {
+        let amount = 0.000_003_1 * (96_000 - bitrate).clamp(0, 32_000) as f32;
+        target += (temporal_vbr * amount * target as f32) as i64;
+    }
+
+    // Never more than double the base rate.
+    target.min(2 * i64::from(base_target)) as i32
+}
+
 /// The per-band analysis outputs shared with the allocator and the
 /// spreading/tf decisions.
 struct Dynalloc {
@@ -1025,6 +1135,11 @@ struct Dynalloc {
     importance: [i32; NB_EBANDS],
     /// Per-band spreading weight (`spread_weight`), for `spreading_decision`.
     spread_weight: [i32; NB_EBANDS],
+    /// Total dynalloc boost in 8th bits (`tot_boost`), for VBR.
+    tot_boost: i32,
+    /// Maximum band depth above the noise floor (`maxDepth`), for the VBR
+    /// rate floor.
+    max_depth: f32,
 }
 
 #[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
@@ -1092,6 +1207,8 @@ fn dynalloc_analysis(
             offsets,
             importance,
             spread_weight,
+            tot_boost: 0,
+            max_depth,
         };
     }
 
@@ -1199,6 +1316,8 @@ fn dynalloc_analysis(
         offsets,
         importance,
         spread_weight,
+        tot_boost,
+        max_depth,
     }
 }
 

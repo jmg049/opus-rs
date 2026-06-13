@@ -79,6 +79,14 @@ impl OpusEncoder {
         self.bandwidth = bandwidth;
     }
 
+    /// Selects variable bitrate at `bitrate` bits/s (`OPUS_SET_BITRATE` with
+    /// VBR). Each call to [`encode`](Self::encode) then treats `max_bytes`
+    /// as a ceiling and shrinks the packet to the per-frame target. Passing
+    /// `None` restores constant bitrate (fill `max_bytes`).
+    pub const fn set_bitrate(&mut self, bitrate: Option<u32>) {
+        self.celt.set_target_bitrate(bitrate);
+    }
+
     /// The range state after the last encoded packet (`OPUS_GET_FINAL_RANGE`).
     /// A conformant decoder finishes the packet with this exact value.
     #[must_use]
@@ -188,6 +196,43 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn vbr_round_trips_and_tracks_the_target_rate() {
+        for &target in &[48_000u32, 96_000, 160_000] {
+            let mut enc = OpusEncoder::new(1);
+            enc.set_bitrate(Some(target));
+            let mut dec = OpusDecoder::new(1);
+            let mut total = 0usize;
+            let frames = 200;
+            for f in 0..frames {
+                let pcm: Vec<f32> = (0..960)
+                    .map(|i| {
+                        let t = (f * 960 + i) as f32 / 48_000.0;
+                        0.5 * (2.0 * core::f32::consts::PI * 440.0 * t).sin()
+                            + 0.2 * (2.0 * core::f32::consts::PI * 1800.0 * t).sin()
+                    })
+                    .collect();
+                // The ceiling is generous; VBR shrinks each frame.
+                let packet = enc.encode(&pcm, 1000).expect("encode");
+                total += packet.len();
+                dec.decode_packet(&packet).expect("decode");
+                assert_eq!(
+                    dec.final_range(),
+                    enc.final_range(),
+                    "range mismatch at {target} bps, frame {f}"
+                );
+            }
+            // 50 frames/s × bytes/frame × 8 = bits/s. Allow ±25% (the simple
+            // VBR omits the analysis-module terms).
+            let achieved = (total as f64 / frames as f64) * 50.0 * 8.0;
+            let ratio = achieved / f64::from(target);
+            assert!(
+                (0.75..1.25).contains(&ratio),
+                "target {target}, achieved {achieved:.0} (ratio {ratio:.2})"
+            );
         }
     }
 

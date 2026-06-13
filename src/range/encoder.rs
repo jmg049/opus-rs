@@ -265,6 +265,29 @@ impl RangeEncoder {
         self.rng
     }
 
+    /// Resizes the frame to `new_size` bytes mid-encode (RFC 6716 §5.1,
+    /// `ec_enc_shrink`), used by VBR once the per-frame byte target is
+    /// known. The already-written raw-bits region is moved to the new end;
+    /// the range-coder data and all pending state are unchanged. `new_size`
+    /// must be at least the current frame size and no larger than the
+    /// original.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the data written so far would not fit in `new_size`, or if
+    /// `new_size` exceeds the original buffer length.
+    pub fn shrink(&mut self, new_size: usize) {
+        assert!(self.offs + self.end_offs <= new_size, "shrink below written data");
+        let old_len = self.buf.len();
+        assert!(new_size <= old_len, "shrink cannot grow the buffer");
+        if new_size != old_len {
+            for k in 0..self.end_offs {
+                self.buf[new_size - self.end_offs + k] = self.buf[old_len - self.end_offs + k];
+            }
+            self.buf.truncate(new_size);
+        }
+    }
+
     /// Terminates the stream and returns the finished frame
     /// (RFC 6716 §5.1.5, `ec_enc_done`).
     ///
