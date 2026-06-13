@@ -14,12 +14,12 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::range::RangeDecoder;
+use crate::range::{RangeDecoder, RangeEncoder};
 
 use super::math::smulbb;
 use super::tables::{
-    LSB_ICDF, PULSES_PER_BLOCK_ICDF, RATE_LEVELS_ICDF, SHELL_CODE_TABLE_OFFSETS, SHELL_CODE_TABLE0, SHELL_CODE_TABLE1,
-    SHELL_CODE_TABLE2, SHELL_CODE_TABLE3, SIGN_ICDF,
+    LSB_ICDF, MAX_PULSES_TABLE, PULSES_PER_BLOCK_BITS_Q5, PULSES_PER_BLOCK_ICDF, RATE_LEVELS_BITS_Q5, RATE_LEVELS_ICDF,
+    SHELL_CODE_TABLE_OFFSETS, SHELL_CODE_TABLE0, SHELL_CODE_TABLE1, SHELL_CODE_TABLE2, SHELL_CODE_TABLE3, SIGN_ICDF,
 };
 
 /// `SHELL_CODEC_FRAME_LENGTH`: samples per shell block.
@@ -185,76 +185,205 @@ pub(crate) fn decode_pulses(
     pulses
 }
 
+/// `combine_and_check`: pairwise-sum `pulses_in` into `pulses_comb`,
+/// returning `true` if any combined count exceeds `max_pulses`.
+fn combine_and_check(pulses_comb: &mut [i32], pulses_in: &[i32], max_pulses: i32, len: usize) -> bool {
+    let mut scale_down = false;
+    for k in 0..len {
+        let sum = pulses_in[2 * k] + pulses_in[2 * k + 1];
+        if sum > max_pulses {
+            scale_down = true;
+        }
+        pulses_comb[k] = sum;
+    }
+    scale_down
+}
+
+/// `silk_shell_encoder` (shell_coder.c): code one 16-sample block's pulse
+/// magnitudes by recursive binary splits, top down.
+fn shell_encoder(enc: &mut RangeEncoder, pulses0: &[i32]) {
+    fn combine(input: &[i32]) -> Vec<i32> {
+        input.chunks_exact(2).map(|p| p[0] + p[1]).collect()
+    }
+    fn encode_split(enc: &mut RangeEncoder, child1: i32, p: i32, table: &[u8]) {
+        if p > 0 {
+            let off = SHELL_CODE_TABLE_OFFSETS[p as usize] as usize;
+            enc.encode_icdf(child1 as usize, &table[off..], 8);
+        }
+    }
+    let pulses1 = combine(pulses0);
+    let pulses2 = combine(&pulses1);
+    let pulses3 = combine(&pulses2);
+    let pulses4 = combine(&pulses3);
+
+    encode_split(enc, pulses3[0], pulses4[0], &SHELL_CODE_TABLE3);
+    encode_split(enc, pulses2[0], pulses3[0], &SHELL_CODE_TABLE2);
+    encode_split(enc, pulses1[0], pulses2[0], &SHELL_CODE_TABLE1);
+    encode_split(enc, pulses0[0], pulses1[0], &SHELL_CODE_TABLE0);
+    encode_split(enc, pulses0[2], pulses1[1], &SHELL_CODE_TABLE0);
+    encode_split(enc, pulses1[2], pulses2[1], &SHELL_CODE_TABLE1);
+    encode_split(enc, pulses0[4], pulses1[2], &SHELL_CODE_TABLE0);
+    encode_split(enc, pulses0[6], pulses1[3], &SHELL_CODE_TABLE0);
+    encode_split(enc, pulses2[2], pulses3[1], &SHELL_CODE_TABLE2);
+    encode_split(enc, pulses1[4], pulses2[2], &SHELL_CODE_TABLE1);
+    encode_split(enc, pulses0[8], pulses1[4], &SHELL_CODE_TABLE0);
+    encode_split(enc, pulses0[10], pulses1[5], &SHELL_CODE_TABLE0);
+    encode_split(enc, pulses1[6], pulses2[3], &SHELL_CODE_TABLE1);
+    encode_split(enc, pulses0[12], pulses1[6], &SHELL_CODE_TABLE0);
+    encode_split(enc, pulses0[14], pulses1[7], &SHELL_CODE_TABLE0);
+}
+
+/// `silk_encode_signs` (code_signs.c): code the sign of each nonzero pulse,
+/// with the probability conditioned on signal type, quantisation offset and
+/// the block's pulse count.
+fn encode_signs(
+    enc: &mut RangeEncoder,
+    pulses: &[i8],
+    length: usize,
+    signal_type: i32,
+    quant_offset_type: i32,
+    sum_pulses: &[i32],
+) {
+    let icdf_base = (7 * (quant_offset_type + (signal_type << 1))) as usize;
+    let icdf_ptr = &SIGN_ICDF[icdf_base..];
+    let n_blocks = (length + SHELL_CODEC_FRAME_LENGTH / 2) >> LOG2_SHELL_CODEC_FRAME_LENGTH;
+    let mut icdf = [0u8; 2];
+    for (i, block) in pulses.chunks(SHELL_CODEC_FRAME_LENGTH).take(n_blocks).enumerate() {
+        if sum_pulses[i] > 0 {
+            icdf[0] = icdf_ptr[((sum_pulses[i] & 0x1f) as usize).min(6)];
+            for &q in block {
+                if q != 0 {
+                    enc.encode_icdf(((i32::from(q) >> 31) + 1) as usize, &icdf, 8);
+                }
+            }
+        }
+    }
+}
+
+/// `silk_encode_pulses`: code the excitation `pulses` (signed quantisation
+/// indices, `frame_length` of them) - rate level, per-block pulse counts
+/// (with LSB extension when a block saturates), the shell magnitudes, the
+/// extra LSB planes, and the signs. The exact inverse of [`decode_pulses`].
+pub(crate) fn encode_pulses(
+    enc: &mut RangeEncoder,
+    signal_type: i32,
+    quant_offset_type: i32,
+    pulses: &[i8],
+    frame_length: usize,
+) {
+    let mut iter = frame_length >> LOG2_SHELL_CODEC_FRAME_LENGTH;
+    if iter * SHELL_CODEC_FRAME_LENGTH < frame_length {
+        debug_assert_eq!(frame_length, 12 * 10);
+        iter += 1;
+    }
+    let padded = iter * SHELL_CODEC_FRAME_LENGTH;
+
+    // Zero-pad the pulses to a whole number of shell blocks (the reference
+    // memsets the tail of the caller's buffer).
+    let mut spulses = vec![0i8; padded];
+    spulses[..frame_length].copy_from_slice(pulses);
+    let pulses = &spulses[..];
+
+    // Absolute values.
+    let mut abs_pulses = vec![0i32; padded];
+    for (a, &p) in abs_pulses.iter_mut().zip(pulses.iter()) {
+        *a = i32::from(p.unsigned_abs());
+    }
+
+    // Per-block sum of pulses, downscaling (LSB planes) until it fits.
+    let mut sum_pulses = vec![0i32; iter];
+    let mut n_rshifts = vec![0i32; iter];
+    for i in 0..iter {
+        let block = &mut abs_pulses[i * SHELL_CODEC_FRAME_LENGTH..(i + 1) * SHELL_CODEC_FRAME_LENGTH];
+        loop {
+            let mut comb = [0i32; 8];
+            let mut scale_down = combine_and_check(&mut comb, block, i32::from(MAX_PULSES_TABLE[0]), 8);
+            let mut comb4 = [0i32; 4];
+            scale_down |= combine_and_check(&mut comb4, &comb, i32::from(MAX_PULSES_TABLE[1]), 4);
+            let mut comb2 = [0i32; 2];
+            scale_down |= combine_and_check(&mut comb2, &comb4, i32::from(MAX_PULSES_TABLE[2]), 2);
+            let mut comb1 = [0i32; 1];
+            scale_down |= combine_and_check(&mut comb1, &comb2, i32::from(MAX_PULSES_TABLE[3]), 1);
+            if scale_down {
+                n_rshifts[i] += 1;
+                for q in block.iter_mut() {
+                    *q >>= 1;
+                }
+            } else {
+                sum_pulses[i] = comb1[0];
+                break;
+            }
+        }
+    }
+
+    // Rate level minimising the per-block count bits.
+    let mut min_bits = i32::MAX;
+    let mut rate_level = 0usize;
+    for k in 0..N_RATE_LEVELS - 1 {
+        let nbits = &PULSES_PER_BLOCK_BITS_Q5[k];
+        let mut sum_bits = i32::from(RATE_LEVELS_BITS_Q5[(signal_type >> 1) as usize][k]);
+        for i in 0..iter {
+            sum_bits += i32::from(if n_rshifts[i] > 0 {
+                nbits[SILK_MAX_PULSES + 1]
+            } else {
+                nbits[sum_pulses[i] as usize]
+            });
+        }
+        if sum_bits < min_bits {
+            min_bits = sum_bits;
+            rate_level = k;
+        }
+    }
+    enc.encode_icdf(rate_level, &RATE_LEVELS_ICDF[(signal_type >> 1) as usize], 8);
+
+    // Per-block pulse counts (with the LSB-extension escapes).
+    let cdf = &PULSES_PER_BLOCK_ICDF[rate_level];
+    let last = &PULSES_PER_BLOCK_ICDF[N_RATE_LEVELS - 1];
+    for i in 0..iter {
+        if n_rshifts[i] == 0 {
+            enc.encode_icdf(sum_pulses[i] as usize, cdf, 8);
+        } else {
+            enc.encode_icdf(SILK_MAX_PULSES + 1, cdf, 8);
+            for _ in 0..n_rshifts[i] - 1 {
+                enc.encode_icdf(SILK_MAX_PULSES + 1, last, 8);
+            }
+            enc.encode_icdf(sum_pulses[i] as usize, last, 8);
+        }
+    }
+
+    // Shell magnitudes.
+    for i in 0..iter {
+        if sum_pulses[i] > 0 {
+            shell_encoder(enc, &abs_pulses[i * SHELL_CODEC_FRAME_LENGTH..]);
+        }
+    }
+
+    // Extra LSB planes (most significant first).
+    for i in 0..iter {
+        if n_rshifts[i] > 0 {
+            let n_ls = n_rshifts[i] - 1;
+            let block = &pulses[i * SHELL_CODEC_FRAME_LENGTH..];
+            for &p in block.iter().take(SHELL_CODEC_FRAME_LENGTH) {
+                let abs_q = i32::from(p.unsigned_abs());
+                for j in (1..=n_ls).rev() {
+                    enc.encode_icdf(((abs_q >> j) & 1) as usize, &LSB_ICDF, 8);
+                }
+                enc.encode_icdf((abs_q & 1) as usize, &LSB_ICDF, 8);
+            }
+            sum_pulses[i] |= n_rshifts[i] << 5;
+        }
+    }
+
+    encode_signs(enc, pulses, frame_length, signal_type, quant_offset_type, &sum_pulses);
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
 
     use crate::range::{RangeDecoder, RangeEncoder};
 
-    use super::super::tables::{
-        SHELL_CODE_TABLE_OFFSETS, SHELL_CODE_TABLE0, SHELL_CODE_TABLE1, SHELL_CODE_TABLE2, SHELL_CODE_TABLE3, SIGN_ICDF,
-    };
     use super::*;
-
-    /// `silk_shell_encoder` (shell_coder.c), ported for round-trip testing.
-    fn shell_encoder(enc: &mut RangeEncoder, pulses0: &[i32; 16]) {
-        fn combine(input: &[i32]) -> Vec<i32> {
-            input.chunks_exact(2).map(|p| p[0] + p[1]).collect()
-        }
-        fn encode_split(enc: &mut RangeEncoder, child1: i32, p: i32, table: &[u8]) {
-            if p > 0 {
-                let off = SHELL_CODE_TABLE_OFFSETS[p as usize] as usize;
-                enc.encode_icdf(child1 as usize, &table[off..], 8);
-            }
-        }
-        let pulses1 = combine(pulses0);
-        let pulses2 = combine(&pulses1);
-        let pulses3 = combine(&pulses2);
-        let pulses4 = combine(&pulses3);
-
-        encode_split(enc, pulses3[0], pulses4[0], &SHELL_CODE_TABLE3);
-
-        encode_split(enc, pulses2[0], pulses3[0], &SHELL_CODE_TABLE2);
-        encode_split(enc, pulses1[0], pulses2[0], &SHELL_CODE_TABLE1);
-        encode_split(enc, pulses0[0], pulses1[0], &SHELL_CODE_TABLE0);
-        encode_split(enc, pulses0[2], pulses1[1], &SHELL_CODE_TABLE0);
-        encode_split(enc, pulses1[2], pulses2[1], &SHELL_CODE_TABLE1);
-        encode_split(enc, pulses0[4], pulses1[2], &SHELL_CODE_TABLE0);
-        encode_split(enc, pulses0[6], pulses1[3], &SHELL_CODE_TABLE0);
-
-        encode_split(enc, pulses2[2], pulses3[1], &SHELL_CODE_TABLE2);
-        encode_split(enc, pulses1[4], pulses2[2], &SHELL_CODE_TABLE1);
-        encode_split(enc, pulses0[8], pulses1[4], &SHELL_CODE_TABLE0);
-        encode_split(enc, pulses0[10], pulses1[5], &SHELL_CODE_TABLE0);
-        encode_split(enc, pulses1[6], pulses2[3], &SHELL_CODE_TABLE1);
-        encode_split(enc, pulses0[12], pulses1[6], &SHELL_CODE_TABLE0);
-        encode_split(enc, pulses0[14], pulses1[7], &SHELL_CODE_TABLE0);
-    }
-
-    /// `silk_encode_signs` (code_signs.c), ported for round-trip testing.
-    fn encode_signs(
-        enc: &mut RangeEncoder,
-        pulses: &[i32],
-        length: usize,
-        signal_type: i32,
-        quant_offset_type: i32,
-        sum_pulses: &[i32],
-    ) {
-        let icdf_base = (7 * (quant_offset_type + (signal_type << 1))) as usize;
-        let icdf_ptr = &SIGN_ICDF[icdf_base..];
-        let n_blocks = (length + SHELL_CODEC_FRAME_LENGTH / 2) >> LOG2_SHELL_CODEC_FRAME_LENGTH;
-        let mut icdf = [0u8; 2];
-        for (i, block) in pulses.chunks(SHELL_CODEC_FRAME_LENGTH).take(n_blocks).enumerate() {
-            if sum_pulses[i] > 0 {
-                icdf[0] = icdf_ptr[((sum_pulses[i] & 0x1f) as usize).min(6)];
-                for &q in block {
-                    if q != 0 {
-                        enc.encode_icdf(((q >> 31) + 1) as usize, &icdf, 8);
-                    }
-                }
-            }
-        }
-    }
 
     fn lcg(seed: &mut u32) -> u32 {
         *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -274,10 +403,16 @@ mod tests {
                     for _ in 0..total {
                         amp[(lcg(&mut seed) % 16) as usize] += 1;
                     }
-                    // Random signs on nonzero amplitudes.
-                    let signed: Vec<i32> = amp
+                    // Random signs on nonzero amplitudes (as i8 pulses).
+                    let signed: Vec<i8> = amp
                         .iter()
-                        .map(|&a| if a > 0 && lcg(&mut seed) & 1 == 1 { -a } else { a })
+                        .map(|&a| {
+                            if a > 0 && lcg(&mut seed) & 1 == 1 {
+                                -a as i8
+                            } else {
+                                a as i8
+                            }
+                        })
                         .collect();
 
                     let mut enc = RangeEncoder::new(256);
@@ -293,8 +428,44 @@ mod tests {
                     let amps: Vec<i32> = got.iter().map(|&v| i32::from(v)).collect();
                     assert_eq!(amps, amp, "amplitudes (total={total})");
                     decode_signs(&mut dec, &mut got, 16, st, qot, &[total]);
-                    let vals: Vec<i32> = got.iter().map(|&v| i32::from(v)).collect();
+                    let vals: Vec<i8> = got.iter().map(|&v| v as i8).collect();
                     assert_eq!(vals, signed, "signs (total={total} st={st} qot={qot})");
+                }
+            }
+        }
+    }
+
+    /// Full excitation round trip: `encode_pulses` → `decode_pulses`
+    /// reproduces the pulses, across frame lengths, signal/offset types, and
+    /// magnitudes large enough to exercise the LSB-extension planes.
+    #[test]
+    fn encode_pulses_round_trips() {
+        let mut seed = 0x1234_5678_u32;
+        for &frame_length in &[80usize, 160, 320, 120] {
+            for st in 0..3i32 {
+                for qot in 0..2i32 {
+                    for &max_amp in &[1i32, 3, 8, 40] {
+                        let mut pulses = vec![0i8; frame_length];
+                        for p in &mut pulses {
+                            // Sparse excitation: mostly zero, occasional pulses.
+                            if lcg(&mut seed) % 4 == 0 {
+                                let a = (lcg(&mut seed) as i32 % (max_amp + 1)) as i8;
+                                *p = if lcg(&mut seed) & 1 == 1 { -a } else { a };
+                            }
+                        }
+
+                        let mut enc = RangeEncoder::new(512);
+                        encode_pulses(&mut enc, st, qot, &pulses, frame_length);
+                        let bytes = enc.finalize().expect("encode fits");
+
+                        let mut dec = RangeDecoder::new(&bytes);
+                        let got = decode_pulses(&mut dec, st, qot, frame_length);
+                        let got_i8: Vec<i8> = got.iter().take(frame_length).map(|&v| v as i8).collect();
+                        assert_eq!(
+                            got_i8, pulses,
+                            "pulses (len={frame_length} st={st} qot={qot} max={max_amp})"
+                        );
+                    }
                 }
             }
         }
