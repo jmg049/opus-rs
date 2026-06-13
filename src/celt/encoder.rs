@@ -139,22 +139,35 @@ impl CeltEncoder {
         }
     }
 
-    /// Encodes one frame of `pcm` (interleaved f32 in `[-1, 1]`; 120, 240,
-    /// 480 or 960 samples per channel at 48 kHz) into `nb_bytes` of output.
+    /// Encodes one fullband frame of `pcm` (interleaved f32 in `[-1, 1]`;
+    /// 120, 240, 480 or 960 samples per channel at 48 kHz) into `nb_bytes`.
     ///
     /// # Panics
     ///
     /// Panics on invalid frame sizes or byte budgets outside 2..=1275.
     pub fn encode_frame(&mut self, pcm: &[f32], nb_bytes: usize) -> Vec<u8> {
+        self.encode_frame_bw(pcm, nb_bytes, NB_EBANDS)
+    }
+
+    /// Encodes one frame coding bands `0..end` (`end` selects the CELT
+    /// bandwidth: 13 = narrowband, 17 = wideband, 19 = super-wideband,
+    /// 21 = fullband). The bands above `end` are left for the decoder to
+    /// fill with folded noise.
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid frame sizes, byte budgets outside 2..=1275, or
+    /// `end` outside 1..=21.
+    pub fn encode_frame_bw(&mut self, pcm: &[f32], nb_bytes: usize, end: usize) -> Vec<u8> {
         let channels = self.channels;
         assert!(pcm.len() % channels == 0, "interleaved frame length");
+        assert!((1..=NB_EBANDS).contains(&end), "end must be 1..=21");
         let n = pcm.len() / channels;
         let lm = (0..=3)
             .find(|&lm| SHORT_MDCT_SIZE << lm == n)
             .expect("frame size must be 120/240/480/960 per channel");
         assert!((2..=1275).contains(&nb_bytes));
         let start = 0usize;
-        let end = NB_EBANDS;
         let m = 1usize << lm;
 
         let mut enc = RangeEncoder::new(nb_bytes);

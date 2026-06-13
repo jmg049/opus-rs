@@ -10,6 +10,7 @@
 use alloc::vec::Vec;
 
 use crate::celt::encoder::CeltEncoder;
+use crate::packet::Bandwidth;
 
 /// Errors returned by [`OpusEncoder::encode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,7 @@ impl std::error::Error for EncodeError {}
 pub struct OpusEncoder {
     celt: CeltEncoder,
     channels: usize,
+    bandwidth: Bandwidth,
 }
 
 impl OpusEncoder {
@@ -66,7 +68,15 @@ impl OpusEncoder {
         OpusEncoder {
             celt: CeltEncoder::with_channels(channels),
             channels,
+            bandwidth: Bandwidth::FullBand,
         }
+    }
+
+    /// Restricts the coded audio bandwidth (`OPUS_SET_BANDWIDTH`). The CELT
+    /// modes support narrowband, wideband, super-wideband and fullband;
+    /// mediumband is treated as wideband (CELT has no 6 kHz mode).
+    pub const fn set_bandwidth(&mut self, bandwidth: Bandwidth) {
+        self.bandwidth = bandwidth;
     }
 
     /// The range state after the last encoded packet (`OPUS_GET_FINAL_RANGE`).
@@ -100,12 +110,18 @@ impl OpusEncoder {
             return Err(EncodeError::InvalidBudget);
         }
 
-        // TOC: CELT-only fullband configs 28..=31, stereo flag, code 0
-        // (one frame per packet).
-        let config = 28 + lm;
+        // TOC: CELT-only configs 16..=31 by bandwidth, stereo flag, code 0
+        // (one frame per packet). `end` is the number of coded CELT bands.
+        let (config_base, end) = match self.bandwidth {
+            Bandwidth::NarrowBand => (16u8, 13usize),
+            Bandwidth::MediumBand | Bandwidth::WideBand => (20, 17),
+            Bandwidth::SuperWideBand => (24, 19),
+            Bandwidth::FullBand => (28, 21),
+        };
+        let config = config_base + lm;
         let toc = (config << 3) | (u8::from(self.channels == 2) << 2);
 
-        let payload = self.celt.encode_frame(pcm, max_bytes - 1);
+        let payload = self.celt.encode_frame_bw(pcm, max_bytes - 1, end);
         let mut packet = Vec::with_capacity(payload.len() + 1);
         packet.push(toc);
         packet.extend_from_slice(&payload);
@@ -141,6 +157,36 @@ mod tests {
                     enc.final_range(),
                     "range mismatch at spf={spf} ch={channels} frame {f}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn round_trips_at_every_celt_bandwidth() {
+        use crate::Bandwidth::{FullBand, NarrowBand, SuperWideBand, WideBand};
+        for bw in [NarrowBand, WideBand, SuperWideBand, FullBand] {
+            for channels in [1usize, 2] {
+                let mut enc = OpusEncoder::new(channels);
+                enc.set_bandwidth(bw);
+                let mut dec = OpusDecoder::new(channels);
+                for f in 0..20 {
+                    let mut pcm = Vec::with_capacity(960 * channels);
+                    for i in 0..960 {
+                        let t = (f * 960 + i) as f32 / 48_000.0;
+                        let s = 0.4 * (2.0 * core::f32::consts::PI * 300.0 * t).sin();
+                        for _ in 0..channels {
+                            pcm.push(s);
+                        }
+                    }
+                    let packet = enc.encode(&pcm, 120).expect("encode");
+                    let out = dec.decode_packet(&packet).expect("decode");
+                    assert_eq!(out.len(), 960 * channels);
+                    assert_eq!(
+                        dec.final_range(),
+                        enc.final_range(),
+                        "range mismatch bw={bw:?} ch={channels} frame {f}"
+                    );
+                }
             }
         }
     }
