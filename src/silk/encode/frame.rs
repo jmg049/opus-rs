@@ -31,6 +31,7 @@ use super::super::nlsf::nlsf2a;
 use super::super::params::LTP_ORDER;
 use super::super::pulses::encode_pulses;
 use super::super::tables::LTPSCALES_TABLE_Q14;
+use super::control::control_snr;
 use super::gains::process_gains;
 use super::lpc::burg_modified;
 use super::ltp::{find_ltp, quant_ltp_gains};
@@ -60,6 +61,8 @@ pub(crate) struct SilkChannelEncoder {
     pub prev_input: Vec<i16>,
     /// Voice-activity detector (noise-floor estimation) state.
     pub vad: VadState,
+    /// Target bitrate (bps), mapped to the coding SNR per frame.
+    pub target_rate_bps: i32,
     /// Entropy-coding history for [`encode_indices`].
     pub ec_prev: EcPrevState,
     pub fs_khz: i32,
@@ -80,10 +83,16 @@ impl SilkChannelEncoder {
             ltp_corr: 0.0,
             prev_input: vec![0; 20 * fs_khz as usize],
             vad: VadState::new(),
+            target_rate_bps: 30_000,
             ec_prev: EcPrevState::default(),
             fs_khz,
             nb_subfr,
         }
+    }
+
+    /// Sets the target bitrate (bps), which maps to the coding SNR per frame.
+    pub(crate) fn set_bitrate(&mut self, bps: i32) {
+        self.target_rate_bps = bps;
     }
 
     /// Encodes one frame of `input` (i16 PCM at the internal rate,
@@ -188,7 +197,7 @@ impl SilkChannelEncoder {
         // the plain NSQ sees ordinary shaping coefficients).
         let la_shape = 3 * self.fs_khz as usize;
         let shaping_lpc_order = 12.min(order);
-        let snr_db_q7 = 18 << 7;
+        let snr_db_q7 = control_snr(self.fs_khz, self.nb_subfr, self.target_rate_bps);
         let mut x_buf = vec![0.0f32; frame_length + 2 * la_shape];
         for (i, &v) in input.iter().enumerate() {
             x_buf[la_shape + i] = f32::from(v);

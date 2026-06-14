@@ -145,7 +145,10 @@ impl VadState {
 
     /// `silk_VAD_GetNoiseLevels`: update the per-band noise-floor estimate
     /// from the current subband energies.
-    #[allow(clippy::needless_range_loop, reason = "parallel per-band state arrays indexed together")]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "parallel per-band state arrays indexed together"
+    )]
     fn get_noise_levels(&mut self, px: &[i32; VAD_N_BANDS]) {
         let min_coef = if self.counter < 1000 {
             let m = i32::from(i16::MAX) / ((self.counter >> 4) + 1);

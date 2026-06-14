@@ -14,6 +14,7 @@
     reason = "encoder kernels are landing incrementally; wired into the pipeline as it assembles"
 )]
 
+pub(crate) mod control;
 pub(crate) mod dsp;
 pub(crate) mod frame;
 pub(crate) mod gains;
