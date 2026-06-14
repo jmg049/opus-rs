@@ -19,6 +19,7 @@ use super::frame::SilkChannelEncoder;
 /// A SILK encoder for one mono stream.
 pub struct SilkEncoder {
     ch: SilkChannelEncoder,
+    final_range: u32,
 }
 
 impl SilkEncoder {
@@ -28,12 +29,20 @@ impl SilkEncoder {
     pub fn new(fs_khz: i32, nb_subfr: usize) -> Self {
         SilkEncoder {
             ch: SilkChannelEncoder::new(fs_khz, nb_subfr),
+            final_range: 0,
         }
     }
 
     /// Sets the target bitrate (bps), which maps to the per-frame coding SNR.
     pub fn set_bitrate(&mut self, bps: i32) {
         self.ch.set_bitrate(bps);
+    }
+
+    /// The range coder state after the last [`encode`](Self::encode)
+    /// (`OPUS_GET_FINAL_RANGE`).
+    #[must_use]
+    pub const fn final_range(&self) -> u32 {
+        self.final_range
     }
 
     /// Encodes `input` (i16 PCM at the internal rate) into a SILK payload.
@@ -72,6 +81,13 @@ impl SilkEncoder {
             self.ch
                 .encode_frame(&mut enc, &input[i * frame_length..(i + 1) * frame_length], cond);
         }
+        self.final_range = enc.range_size();
+        // `finalize` returns the full allocated buffer; shrink to the bytes the
+        // coder actually used (SILK is purely range-coded, no raw-bit tail) so
+        // the payload is the real frame size.
+        let bits = (enc.tell_frac() as usize + 7) >> 3;
+        let nbytes = bits.div_ceil(8).max(2);
+        enc.shrink(nbytes);
         enc.finalize().expect("SILK packet fits the range coder")
     }
 }
