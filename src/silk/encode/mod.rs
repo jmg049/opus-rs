@@ -26,4 +26,5 @@ pub(crate) mod noise_shape;
 pub(crate) mod nsq;
 pub(crate) mod pitch_analysis;
 pub(crate) mod resample;
+pub(crate) mod stereo;
 pub(crate) mod vad;
