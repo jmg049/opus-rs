@@ -25,11 +25,14 @@ use super::super::pulses::encode_pulses;
 use super::gains::process_gains;
 use super::lpc::burg_modified;
 use super::nlsf::{a2nlsf, nlsf_encode, nlsf_vq_weights_laroia};
+use super::noise_shape::{NoiseShapeConfig, ShapeState, noise_shape_analysis};
 use super::nsq::{NsqConfig, NsqState, nsq};
 
 /// One channel's SILK encoder state for the (unvoiced) frame path.
 pub(crate) struct SilkChannelEncoder {
     pub nsq: NsqState,
+    /// Cross-frame noise-shaping smoothing state (`sShape`).
+    pub shape: ShapeState,
     /// Gain-quantiser accumulator (`sShape.LastGainIndex`).
     pub last_gain_index: i8,
     /// Entropy-coding history for [`encode_indices`].
@@ -44,6 +47,7 @@ impl SilkChannelEncoder {
     pub(crate) fn new(fs_khz: i32, nb_subfr: usize) -> Self {
         SilkChannelEncoder {
             nsq: NsqState::new(),
+            shape: ShapeState::default(),
             last_gain_index: 10,
             ec_prev: EcPrevState::default(),
             fs_khz,
@@ -84,42 +88,89 @@ impl SilkChannelEncoder {
         pred_coef[..order].copy_from_slice(&a_q12[..order]);
         pred_coef[MAX_LPC_ORDER..MAX_LPC_ORDER + order].copy_from_slice(&a_q12[..order]);
 
-        // Per-subframe gains from the LPC residual energy.
+        // Noise-shaping analysis (complexity-0 configuration: no warping, so
+        // the plain NSQ sees ordinary shaping coefficients). It produces the
+        // AR/tilt/LF shapers and the pre-quantisation per-subframe gains.
+        let la_shape = 3 * self.fs_khz as usize;
+        let shaping_lpc_order = 12.min(order);
+        let shape_win_length = subfr_length + 2 * la_shape;
+        let snr_db_q7 = 18 << 7;
+
+        // Sparseness measure uses the LPC residual over the frame as a stand-in
+        // for the pitch-analysis residual (the unvoiced path has no pitch pass).
         let mut residual = vec![0i16; frame_length];
         lpc_analysis_filter(&mut residual, input, &a_q12[..order]);
-        let mut gains = [0.0f32; MAX_NB_SUBFR];
+        let pitch_res: Vec<f32> = residual.iter().map(|&r| f32::from(r)).collect();
+
+        // The analysis window needs `la_shape` of history and lookahead; this
+        // isolated frame path zero-pads both ends.
+        let mut x_buf = vec![0.0f32; frame_length + 2 * la_shape];
+        for (i, &v) in input.iter().enumerate() {
+            x_buf[la_shape + i] = f32::from(v);
+        }
+        let shape_cfg = NoiseShapeConfig {
+            fs_khz: self.fs_khz,
+            nb_subfr: self.nb_subfr,
+            subfr_length,
+            la_shape,
+            shape_win_length,
+            shaping_lpc_order,
+            warping_q16: 0,
+            signal_type: TYPE_UNVOICED,
+            snr_db_q7,
+            speech_activity_q8: 256,
+            input_quality_bands_q15: [32768, 32768],
+            use_cbr: true,
+            ltp_corr: 0.0,
+            pred_gain: 0.0,
+            input_tilt_q15: 0,
+            pitch_l: [0; MAX_NB_SUBFR],
+        };
+        let shp = noise_shape_analysis(&mut self.shape, &shape_cfg, &pitch_res, &x_buf);
+
+        // Residual energy on the gain-normalised signal (per `silk_residual_
+        // energy_FLP`): ResNrg[k] = Gains[k]^2 * energy(LPC residual of x/Gain).
+        let a_f: Vec<f32> = a_q12[..order].iter().map(|&c| f32::from(c) / 4096.0).collect();
+        let mut x_hist = vec![0.0f32; order + frame_length];
+        for (i, &v) in input.iter().enumerate() {
+            x_hist[order + i] = f32::from(v);
+        }
+        let mut gains = shp.gains;
         let mut res_nrg = [0.0f32; MAX_NB_SUBFR];
         for k in 0..self.nb_subfr {
-            let nrg: f64 = residual[k * subfr_length..(k + 1) * subfr_length]
-                .iter()
-                .map(|&r| f64::from(r) * f64::from(r))
-                .sum();
-            res_nrg[k] = nrg as f32;
-            gains[k] = ((nrg / subfr_length as f64).sqrt() as f32).max(4.0);
+            let inv_gain = 1.0 / gains[k];
+            let base = k * subfr_length;
+            let mut nrg = 0.0f64;
+            for n in 0..subfr_length {
+                let p = base + order + n;
+                let mut acc = x_hist[p] * inv_gain;
+                for (j, &aj) in a_f.iter().enumerate() {
+                    acc -= aj * x_hist[p - 1 - j] * inv_gain;
+                }
+                nrg += f64::from(acc) * f64::from(acc);
+            }
+            res_nrg[k] = (f64::from(gains[k]) * f64::from(gains[k]) * nrg) as f32;
         }
+
         let gres = process_gains(
             &mut gains,
             &res_nrg,
             TYPE_UNVOICED,
-            0,
+            shp.quant_offset_type,
             self.nb_subfr,
             subfr_length,
-            18 << 7,
+            snr_db_q7,
             0.0,
             0,
-            0,
-            0,
-            0.5,
-            0.5,
+            1,
+            256,
+            shp.input_quality,
+            shp.coding_quality,
             &mut self.last_gain_index,
             cond_coding,
         );
 
-        // Flat noise shaping (the decoder ignores it; NSQ degenerates to a
-        // scalar quantiser with LPC prediction).
-        let ar_q13 = [0i16; MAX_NB_SUBFR * 24];
         let ltp_coef = [0i16; 5 * MAX_NB_SUBFR];
-        let zeros = [0i32; MAX_NB_SUBFR];
         let pitch_l = [0i32; MAX_NB_SUBFR];
         let seed = 0i32;
 
@@ -129,7 +180,7 @@ impl SilkChannelEncoder {
             nb_subfr: self.nb_subfr,
             ltp_mem_length: 20 * self.fs_khz as usize,
             predict_lpc_order: order,
-            shaping_lpc_order: 16,
+            shaping_lpc_order,
         };
         let mut pulses = vec![0i8; frame_length];
         let lambda_q10 = (gres.lambda * 1024.0) as i32;
@@ -144,10 +195,10 @@ impl SilkChannelEncoder {
             &mut pulses,
             &pred_coef,
             &ltp_coef,
-            &ar_q13,
-            &zeros,
-            &zeros,
-            &zeros,
+            &shp.ar_q13,
+            &shp.harm_shape_gain_q14,
+            &shp.tilt_q14,
+            &shp.lf_shp_q14,
             &gres.gains_q16,
             &pitch_l,
             lambda_q10,
