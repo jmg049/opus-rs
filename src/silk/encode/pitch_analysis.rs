@@ -13,7 +13,17 @@ use alloc::vec;
 
 use super::super::indices::MAX_NB_SUBFR;
 use super::super::tables::{CB_LAGS_STAGE2, CB_LAGS_STAGE2_10_MS, CB_LAGS_STAGE3, CB_LAGS_STAGE3_10_MS};
+use super::dsp::{apply_sine_window, autocorrelation, bwexpander, k2a, lpc_analysis_filter_flp, schur};
 use super::resample::down2;
+
+/// `LA_PITCH_MS`.
+const LA_PITCH_MS: usize = 2;
+/// `FIND_PITCH_WHITE_NOISE_FRACTION` / `FIND_PITCH_BANDWIDTH_EXPANSION`.
+const FIND_PITCH_WHITE_NOISE_FRACTION: f32 = 1e-3;
+const FIND_PITCH_BANDWIDTH_EXPANSION: f32 = 0.99;
+/// `FIND_PITCH_LPC_WIN_MS` (4-subframe) / `_2_SF` (2-subframe), in ms.
+const FIND_PITCH_LPC_WIN_MS: usize = 24;
+const FIND_PITCH_LPC_WIN_MS_2_SF: usize = 14;
 
 const PE_LTP_MEM_LENGTH_MS: usize = 20;
 const PE_SUBFR_LENGTH_MS: usize = 5;
@@ -499,6 +509,100 @@ fn lag_range(k: usize, complexity: usize, cbk_max: bool) -> (i32, i32) {
     }
 }
 
+/// The result of [`find_pitch_lags`].
+pub(crate) struct PitchLagsResult {
+    /// 0 if voiced, 1 if unvoiced.
+    pub voicing: i32,
+    pub pitch_l: [i32; MAX_NB_SUBFR],
+    pub lag_index: i16,
+    pub contour_index: i8,
+    /// Whitening-filter prediction gain (`predGain`), used by noise shaping.
+    pub pred_gain: f32,
+}
+
+/// `silk_find_pitch_lags_FLP`: whiten the input with a short-term LPC, then
+/// run [`pitch_analysis_core`] on the residual. `x_buf` is the input with
+/// `ltp_mem_length` of history before the frame and `la_pitch` of lookahead
+/// after it (length `la_pitch + frame_length + ltp_mem_length`); `res`
+/// receives the whitened residual (same length). Returns the voicing
+/// decision and pitch indices, and updates `ltp_corr`.
+#[allow(clippy::too_many_arguments, reason = "mirrors the reference encoder inputs")]
+pub(crate) fn find_pitch_lags(
+    x_buf: &[f32],
+    res: &mut [f32],
+    fs_khz: i32,
+    nb_subfr: usize,
+    pitch_est_lpc_order: usize,
+    pe_complexity: usize,
+    search_thres1: f32,
+    prev_lag: i32,
+    prev_signal_type: i32,
+    speech_activity_q8: i32,
+    input_tilt_q15: i32,
+    ltp_corr: &mut f32,
+) -> PitchLagsResult {
+    let buf_len = x_buf.len();
+    let order = pitch_est_lpc_order;
+    let la_pitch = LA_PITCH_MS * fs_khz as usize;
+    let pitch_lpc_win_length = if nb_subfr == MAX_NB_SUBFR {
+        FIND_PITCH_LPC_WIN_MS * fs_khz as usize
+    } else {
+        FIND_PITCH_LPC_WIN_MS_2_SF * fs_khz as usize
+    };
+
+    // Window: sine slope, flat middle, cosine slope, over the last
+    // `pitch_lpc_win_length` samples of the buffer.
+    let mut wsig = vec![0.0f32; pitch_lpc_win_length];
+    let xp = buf_len - pitch_lpc_win_length;
+    apply_sine_window(&mut wsig[..la_pitch], &x_buf[xp..xp + la_pitch], 1, la_pitch);
+    let mid = pitch_lpc_win_length - 2 * la_pitch;
+    wsig[la_pitch..la_pitch + mid].copy_from_slice(&x_buf[xp + la_pitch..xp + la_pitch + mid]);
+    apply_sine_window(
+        &mut wsig[pitch_lpc_win_length - la_pitch..],
+        &x_buf[xp + pitch_lpc_win_length - la_pitch..xp + pitch_lpc_win_length],
+        2,
+        la_pitch,
+    );
+
+    // Short-term whitening LPC via autocorrelation → Schur → k2a.
+    let mut auto_corr = vec![0.0f32; order + 1];
+    autocorrelation(&mut auto_corr, &wsig, order + 1);
+    auto_corr[0] += auto_corr[0] * FIND_PITCH_WHITE_NOISE_FRACTION + 1.0;
+    let mut refl = vec![0.0f32; order];
+    let res_nrg = schur(&mut refl, &auto_corr, order);
+    let pred_gain = auto_corr[0] / res_nrg.max(1.0);
+    let mut a = vec![0.0f32; order];
+    k2a(&mut a, &refl, order);
+    bwexpander(&mut a, order, FIND_PITCH_BANDWIDTH_EXPANSION);
+    lpc_analysis_filter_flp(res, &a, x_buf, buf_len, order);
+
+    // Voicing threshold, then the lag search on the residual.
+    let mut thrhld = 0.6f32;
+    thrhld -= 0.004 * order as f32;
+    thrhld -= 0.1 * speech_activity_q8 as f32 * (1.0 / 256.0);
+    thrhld -= 0.15 * (prev_signal_type >> 1) as f32;
+    thrhld -= 0.1 * input_tilt_q15 as f32 * (1.0 / 32768.0);
+
+    let (voicing, pitch_l, lag_index, contour_index) = pitch_analysis_core(
+        res,
+        fs_khz,
+        pe_complexity,
+        nb_subfr,
+        prev_lag,
+        search_thres1,
+        thrhld,
+        ltp_corr,
+    );
+
+    PitchLagsResult {
+        voicing,
+        pitch_l,
+        lag_index,
+        contour_index,
+        pred_gain,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +631,47 @@ mod tests {
         assert_eq!(lag_index, 88, "lag index disagrees with reference");
         assert_eq!(contour_index, 0, "contour index disagrees with reference");
         assert!((ltp_corr - 0.998095).abs() < 1e-3, "LTPCorr {ltp_corr} off");
+    }
+
+    /// Bit-exact pin against the compiled reference `silk_find_pitch_lags_FLP`
+    /// (replicated via the reference helper functions) for a periodic frame.
+    #[test]
+    fn find_pitch_lags_matches_reference_pin() {
+        let (fs_khz, nb) = (16i32, 4usize);
+        let ltp_mem = 20 * fs_khz as usize;
+        let la_pitch = 2 * fs_khz as usize;
+        let frame_len = nb * 5 * fs_khz as usize;
+        let buf_len = la_pitch + frame_len + ltp_mem;
+
+        let x_buf: alloc::vec::Vec<f32> = (0..buf_len)
+            .map(|i| {
+                let mut s = 2500.0 * (core::f32::consts::TAU * i as f32 / 100.0).sin();
+                s += 900.0 * (core::f32::consts::TAU * i as f32 / 50.0).sin();
+                s += ((i as i32 * 1733 + 3) % 173 - 86) as f32 * 1.2;
+                s
+            })
+            .collect();
+
+        let mut res = alloc::vec![0.0f32; buf_len];
+        let mut ltp_corr = 0.0f32;
+        let r = find_pitch_lags(&x_buf, &mut res, fs_khz, nb, 16, 2, 0.7, 0, 0, 128, 0, &mut ltp_corr);
+
+        assert_eq!(r.voicing, 0, "should be voiced");
+        assert_eq!(r.pitch_l, [101, 102, 102, 103], "pitch lags disagree with reference");
+        assert_eq!(r.lag_index, 70, "lag index disagrees with reference");
+        assert_eq!(r.contour_index, 6, "contour index disagrees with reference");
+        assert!((r.pred_gain - 413.064_18).abs() < 0.5, "predGain {} off", r.pred_gain);
+        assert!((ltp_corr - 0.492830).abs() < 1e-3, "LTPCorr {ltp_corr} off");
+        // A few residual samples (the LPC whitening output).
+        let expected = [
+            (330usize, 14.3833f32),
+            (331, 16.1938),
+            (332, 17.8513),
+            (333, 19.3114),
+            (334, 20.5311),
+        ];
+        for (i, exp) in expected {
+            assert!((res[i] - exp).abs() < 0.5, "res[{i}] = {} vs {exp}", res[i]);
+        }
     }
 }
