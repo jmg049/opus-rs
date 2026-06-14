@@ -49,6 +49,8 @@ pub use decoder::{OggDecodeError, OpusDecoder, decode_ogg_opus};
 pub use encoder::{EncodeError, OpusEncoder};
 #[cfg(feature = "std")]
 pub use multistream::MultistreamDecoder;
+#[cfg(feature = "std")]
+pub use silk::encode::api::SilkEncoder;
 #[cfg(feature = "experimental-codec")]
 pub mod experimental;
 #[cfg(feature = "experimental-codec")]
