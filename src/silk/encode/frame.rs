@@ -38,6 +38,7 @@ use super::nlsf::{a2nlsf, nlsf_encode, nlsf_vq_weights_laroia};
 use super::noise_shape::{NoiseShapeConfig, ShapeState, noise_shape_analysis};
 use super::nsq::{NsqConfig, NsqState, nsq};
 use super::pitch_analysis::find_pitch_lags;
+use super::vad::VadState;
 
 /// One channel's SILK encoder state.
 pub(crate) struct SilkChannelEncoder {
@@ -57,6 +58,8 @@ pub(crate) struct SilkChannelEncoder {
     /// The previous `ltp_mem_length` input samples, used as pitch-analysis
     /// history for the next frame.
     pub prev_input: Vec<i16>,
+    /// Voice-activity detector (noise-floor estimation) state.
+    pub vad: VadState,
     /// Entropy-coding history for [`encode_indices`].
     pub ec_prev: EcPrevState,
     pub fs_khz: i32,
@@ -76,6 +79,7 @@ impl SilkChannelEncoder {
             prev_signal_type: TYPE_UNVOICED,
             ltp_corr: 0.0,
             prev_input: vec![0; 20 * fs_khz as usize],
+            vad: VadState::new(),
             ec_prev: EcPrevState::default(),
             fs_khz,
             nb_subfr,
@@ -98,6 +102,10 @@ impl SilkChannelEncoder {
         let ltp_mem_length = 20 * self.fs_khz as usize;
         let la_pitch = 2 * self.fs_khz as usize;
         debug_assert_eq!(input.len(), frame_length);
+
+        // Voice-activity analysis: speech-activity, spectral tilt and per-band
+        // input quality, which tune the pitch threshold, noise shaping and gains.
+        let vad = self.vad.get_sa_q8(input, frame_length, self.fs_khz);
 
         // Pitch analysis: whiten and search for the lag. `pitch_x_buf` holds
         // `ltp_mem_length` of history, the frame, then `la_pitch` lookahead;
@@ -122,8 +130,8 @@ impl SilkChannelEncoder {
             0.7,
             self.prev_lag,
             self.prev_signal_type,
-            256,
-            0,
+            vad.speech_activity_q8,
+            vad.input_tilt_q15,
             &mut self.ltp_corr,
         );
         let is_voiced = pl.voicing == 0;
@@ -195,12 +203,12 @@ impl SilkChannelEncoder {
             warping_q16: 0,
             signal_type,
             snr_db_q7,
-            speech_activity_q8: 256,
-            input_quality_bands_q15: [32768, 32768],
+            speech_activity_q8: vad.speech_activity_q8,
+            input_quality_bands_q15: [vad.input_quality_bands_q15[0], vad.input_quality_bands_q15[1]],
             use_cbr: true,
             ltp_corr: self.ltp_corr,
             pred_gain: pl.pred_gain,
-            input_tilt_q15: 0,
+            input_tilt_q15: vad.input_tilt_q15,
             pitch_l,
         };
         let shp = noise_shape_analysis(&mut self.shape, &shape_cfg, &res_f, &x_buf);
@@ -238,9 +246,9 @@ impl SilkChannelEncoder {
             subfr_length,
             snr_db_q7,
             pred_gain_db,
-            0,
+            vad.input_tilt_q15,
             1,
-            256,
+            vad.speech_activity_q8,
             shp.input_quality,
             shp.coding_quality,
             &mut self.last_gain_index,
