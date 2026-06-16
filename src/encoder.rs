@@ -8,7 +8,9 @@
 //! SILK internal rate and coded by [`crate::silk::SilkEncoder`]. The heavy
 //! lifting is in [`crate::celt::encoder::CeltEncoder`] and the SILK encode
 //! modules; this layer chooses the TOC byte and frames a conformant Opus
-//! packet. Hybrid mode and automatic SILK/CELT selection build on top.
+//! packet. [`OpusEncoder::encode_auto`] picks SILK or CELT per frame from the
+//! frame size and target bitrate. Hybrid mode (SILK+CELT in one packet) is
+//! the remaining mode.
 
 use alloc::vec::Vec;
 
@@ -113,6 +115,44 @@ impl OpusEncoder {
     pub const fn set_bitrate(&mut self, bitrate: Option<u32>) {
         self.celt.set_target_bitrate(bitrate);
         self.target_bitrate = bitrate;
+    }
+
+    /// Encodes one frame, automatically choosing SILK (speech / lower rate)
+    /// or CELT (music / higher rate). This is a simplified mode decision (not
+    /// libopus's full hysteresis): the SILK-only frame sizes 40/60 ms always
+    /// use SILK, the CELT-only sizes 2.5/5 ms always use CELT, and 10/20 ms
+    /// pick SILK when the target bitrate is set and below a threshold scaled
+    /// by the audio bandwidth (otherwise CELT). Hybrid mode is not yet chosen
+    /// here. `pcm` is interleaved 48 kHz f32; see [`encode`](Self::encode) and
+    /// [`encode_silk`](Self::encode_silk) for the per-mode details.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode`](Self::encode) / [`encode_silk`](Self::encode_silk).
+    pub fn encode_auto(&mut self, pcm: &[f32], max_bytes: usize) -> Result<Vec<u8>, EncodeError> {
+        if self.channels == 0 || pcm.len() % self.channels != 0 {
+            return Err(EncodeError::InvalidFrameSize);
+        }
+        let per_ch = pcm.len() / self.channels;
+        match per_ch {
+            120 | 240 => self.encode(pcm, max_bytes),        // 2.5/5 ms: CELT only
+            1920 | 2880 => self.encode_silk(pcm, max_bytes), // 40/60 ms: SILK only
+            480 | 960 => {
+                // SILK suits speech bandwidths up to wideband; above that, or
+                // without a low target bitrate, CELT.
+                let wb_or_below = matches!(
+                    self.bandwidth,
+                    Bandwidth::NarrowBand | Bandwidth::MediumBand | Bandwidth::WideBand
+                );
+                let silk = wb_or_below && self.target_bitrate.is_some_and(|b| b <= 24_000);
+                if silk {
+                    self.encode_silk(pcm, max_bytes)
+                } else {
+                    self.encode(pcm, max_bytes)
+                }
+            },
+            _ => Err(EncodeError::InvalidFrameSize),
+        }
     }
 
     /// The range state after the last encoded packet (`OPUS_GET_FINAL_RANGE`).
@@ -378,6 +418,44 @@ mod tests {
         // collapses some stereo width, so it is well below 1).
         assert!(!saw_mismatch, "stereo SILK range mismatch through OpusDecoder");
         assert!(last_corr > 0.5, "stereo correlation {last_corr:.3} too low");
+    }
+
+    /// `encode_auto` dispatches to a valid mode for each frame size / bitrate
+    /// and the packets decode through `OpusDecoder` with matching final range.
+    #[test]
+    fn encode_auto_dispatches_and_round_trips() {
+        // (per-channel samples, bandwidth, target bitrate, expected SILK?)
+        let cases = [
+            (240usize, Bandwidth::FullBand, None, false),       // 5 ms → CELT
+            (1920, Bandwidth::WideBand, Some(20_000u32), true), // 40 ms → SILK
+            (960, Bandwidth::WideBand, Some(16_000), true),     // 20 ms low → SILK
+            (960, Bandwidth::FullBand, Some(64_000), false),    // 20 ms FB → CELT
+            (480, Bandwidth::WideBand, None, false),            // 10 ms no rate → CELT
+        ];
+        for (spf, bw, br, want_silk) in cases {
+            let mut enc = OpusEncoder::new(1);
+            enc.set_bandwidth(bw);
+            enc.set_bitrate(br);
+            let mut dec = OpusDecoder::new(1);
+            let mut last_packet = None;
+            for f in 0..4 {
+                let pcm: Vec<f32> = (0..spf)
+                    .map(|i| {
+                        let t = (f * spf + i) as f32 / 48_000.0;
+                        0.3 * (2.0 * core::f32::consts::PI * 300.0 * t).sin()
+                    })
+                    .collect();
+                let packet = enc.encode_auto(&pcm, 1275).expect("encode_auto");
+                let out = dec.decode_packet(&packet).expect("decode");
+                assert_eq!(out.len(), spf);
+                assert_eq!(dec.final_range(), enc.final_range(), "range mismatch spf={spf}");
+                last_packet = Some(packet);
+            }
+            // The TOC config picks the mode: SILK configs are 0..12.
+            let toc = last_packet.unwrap()[0];
+            let is_silk = (toc >> 3) < 12;
+            assert_eq!(is_silk, want_silk, "mode for spf={spf} bw={bw:?} br={br:?}");
+        }
     }
 
     #[test]
