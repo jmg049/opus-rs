@@ -19,15 +19,17 @@ use crate::celt::encoder::CeltEncoder;
 use crate::packet::Bandwidth;
 use crate::range::RangeEncoder;
 
-/// Errors returned by [`OpusEncoder::encode`].
+/// Errors returned by the [`OpusEncoder`] encode methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EncodeError {
-    /// The frame had an unsupported number of samples per channel. At
-    /// 48 kHz the encoder accepts 120, 240, 480 or 960 (2.5/5/10/20 ms).
+    /// The frame had an unsupported number of samples per channel for the
+    /// chosen mode (CELT: 120/240/480/960; SILK: 480/960/1920/2880; hybrid:
+    /// 480/960 - all at 48 kHz), or the channel count did not match.
     InvalidFrameSize,
-    /// The output budget is outside the usable range: at least 3 bytes
-    /// (1 TOC + 2 payload) and at most 1275 (the Opus per-frame limit).
+    /// The output budget is outside the usable range (at least 3 bytes, at
+    /// most 1275 - the Opus per-frame limit), or the coded packet could not
+    /// be made to fit it.
     InvalidBudget,
 }
 
@@ -44,7 +46,8 @@ impl core::fmt::Display for EncodeError {
 #[cfg(feature = "std")]
 impl std::error::Error for EncodeError {}
 
-/// A pure-Rust Opus encoder producing CELT-only fullband packets at 48 kHz.
+/// A pure-Rust Opus encoder at 48 kHz, producing CELT, SILK (mono/stereo) and
+/// hybrid packets; [`encode_auto`](Self::encode_auto) chooses the mode.
 ///
 /// ```
 /// use opus_native::{OpusEncoder, OpusDecoder};
@@ -110,10 +113,11 @@ impl OpusEncoder {
         self.bandwidth = bandwidth;
     }
 
-    /// Selects variable bitrate at `bitrate` bits/s (`OPUS_SET_BITRATE` with
-    /// VBR). Each call to [`encode`](Self::encode) then treats `max_bytes`
-    /// as a ceiling and shrinks the packet to the per-frame target. Passing
-    /// `None` restores constant bitrate (fill `max_bytes`).
+    /// Sets the target bitrate in bits/s (`OPUS_SET_BITRATE`). For CELT
+    /// ([`encode`](Self::encode)) this selects VBR, treating `max_bytes` as a
+    /// ceiling and shrinking each packet to its per-frame target (`None`
+    /// restores CBR, filling `max_bytes`). For SILK/hybrid it sets the coding
+    /// SNR, and it drives the mode choice in [`encode_auto`](Self::encode_auto).
     pub const fn set_bitrate(&mut self, bitrate: Option<u32>) {
         self.celt.set_target_bitrate(bitrate);
         self.target_bitrate = bitrate;

@@ -50,7 +50,7 @@ pub use encoder::{EncodeError, OpusEncoder};
 #[cfg(feature = "std")]
 pub use multistream::MultistreamDecoder;
 #[cfg(feature = "std")]
-pub use silk::encode::api::SilkEncoder;
+pub use silk::encode::api::{SilkEncoder, SilkStereoEncoder};
 #[cfg(feature = "experimental-codec")]
 pub mod experimental;
 #[cfg(feature = "experimental-codec")]

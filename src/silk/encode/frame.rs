@@ -234,7 +234,6 @@ impl SilkChannelEncoder {
             use_cbr: true,
             ltp_corr: self.ltp_corr,
             pred_gain: pl.pred_gain,
-            input_tilt_q15: vad.input_tilt_q15,
             pitch_l,
         };
         let shp = noise_shape_analysis(&mut self.shape, &shape_cfg, &res_f, &x_buf);

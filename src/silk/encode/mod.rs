@@ -1,18 +1,15 @@
 //! The SILK encoder (RFC 6716 §5.2; normative `silk/` and `silk/float/`).
 //!
-//! Work in progress. SILK is the speech/low-bitrate half of Opus; this
-//! module is being built up kernel by kernel, starting with the linear
-//! prediction analysis, each validated in isolation before the full encode
-//! pipeline (LPC/LTP/gain/NLSF quantisation, the noise-shaping quantiser,
-//! and the index/pulse bitstream) is assembled.
+//! SILK is the speech/low-bitrate half of Opus. The full encode pipeline is
+//! assembled here - short-term (Burg LPC → NLSF VQ) and long-term (pitch +
+//! LTP) prediction, noise-shaping analysis, gain quantisation, the noise-
+//! shaping quantiser, voice-activity detection, rate control, mid/side stereo,
+//! and the index/pulse bitstream - driven by [`api::SilkEncoder`] (mono) and
+//! [`api::SilkStereoEncoder`].
 //!
 //! The analysis uses the reference float build; the quantisation indices it
 //! emits are read back by the existing bit-exact fixed-point decoder, so the
 //! round trip is the conformance oracle.
-#![allow(
-    dead_code,
-    reason = "encoder kernels are landing incrementally; wired into the pipeline as it assembles"
-)]
 
 pub mod api;
 pub(crate) mod control;

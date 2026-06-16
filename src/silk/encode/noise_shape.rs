@@ -75,7 +75,6 @@ pub(crate) struct NoiseShapeConfig {
     pub ltp_corr: f32,
     /// Prediction gain of the pitch analysis whitening filter.
     pub pred_gain: f32,
-    pub input_tilt_q15: i32,
     /// Pitch lags per subframe (voiced low-frequency shaping only).
     pub pitch_l: [i32; MAX_NB_SUBFR],
 }
