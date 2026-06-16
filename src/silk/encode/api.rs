@@ -22,6 +22,7 @@ use super::frame::SilkChannelEncoder;
 use super::stereo::{StereoEncState, lr_to_ms, stereo_encode_mid_only, stereo_encode_pred};
 
 /// A SILK encoder for one mono stream.
+#[derive(Clone)]
 pub struct SilkEncoder {
     ch: SilkChannelEncoder,
     final_range: u32,
@@ -41,6 +42,30 @@ impl SilkEncoder {
     /// Sets the target bitrate (bps), which maps to the per-frame coding SNR.
     pub fn set_bitrate(&mut self, bps: i32) {
         self.ch.set_bitrate(bps);
+    }
+
+    /// Encodes `input` to a SILK payload of at most `max_payload` bytes,
+    /// lowering the coding SNR (bitrate) and re-encoding from a snapshot if
+    /// the first attempt overshoots - a coarse closed-loop rate control.
+    /// Returns `None` if even the minimum bitrate cannot fit. The encoder
+    /// state advances exactly once (the accepted attempt).
+    pub fn encode_capped(&mut self, input: &[i16], max_payload: usize) -> Option<Vec<u8>> {
+        let snapshot = self.clone();
+        let mut bps = self.ch.target_rate_bps;
+        for _ in 0..6 {
+            let bytes = self.encode(input);
+            if bytes.len() <= max_payload {
+                return Some(bytes);
+            }
+            // Overshot: restore the pre-encode state and try a lower rate.
+            if bps <= 6_000 {
+                return None;
+            }
+            bps = (bps * 3 / 4).max(6_000);
+            *self = snapshot.clone();
+            self.set_bitrate(bps);
+        }
+        None
     }
 
     /// The range coder state after the last [`encode`](Self::encode)

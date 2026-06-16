@@ -42,6 +42,7 @@ use super::pitch_analysis::find_pitch_lags;
 use super::vad::VadState;
 
 /// One channel's SILK encoder state.
+#[derive(Clone)]
 pub(crate) struct SilkChannelEncoder {
     pub nsq: NsqState,
     /// Cross-frame noise-shaping smoothing state (`sShape`).

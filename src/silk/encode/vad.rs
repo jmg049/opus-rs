@@ -92,6 +92,7 @@ fn rshift_round(a: i32, shift: u32) -> i32 {
 }
 
 /// Cross-frame VAD state (`silk_VAD_state`).
+#[derive(Clone)]
 pub(crate) struct VadState {
     ana_state: [i32; 2],
     ana_state1: [i32; 2],

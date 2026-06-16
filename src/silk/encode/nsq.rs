@@ -46,6 +46,7 @@ fn rand(seed: i32) -> i32 {
 }
 
 /// Per-channel NSQ state (`silk_nsq_state`), carried across frames.
+#[derive(Clone)]
 pub(crate) struct NsqState {
     /// Quantised output buffer (`xq`).
     pub xq: Vec<i16>,

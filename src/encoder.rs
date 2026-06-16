@@ -277,7 +277,10 @@ impl OpusEncoder {
             let out_len = per_ch * internal_khz as usize / 48;
             let mut internal = vec![0i16; out_len];
             resampler.process(&mut internal, &in16);
-            let p = silk.encode(&internal);
+            // Closed-loop rate control: fit the byte budget (less the TOC).
+            let p = silk
+                .encode_capped(&internal, max_bytes - 1)
+                .ok_or(EncodeError::InvalidBudget)?;
             self.last_final_range = silk.final_range();
             p
         } else {
@@ -555,6 +558,34 @@ mod tests {
                 'c'
             };
             assert_eq!(mode, want_mode, "mode for spf={spf} bw={bw:?} br={br:?}");
+        }
+    }
+
+    /// SILK closed-loop rate control: a tight byte budget that the default
+    /// quality would overshoot is honoured by lowering the rate, and the
+    /// capped packet still decodes through `OpusDecoder` with matching range.
+    #[test]
+    fn silk_rate_control_respects_a_tight_budget() {
+        let mut enc = OpusEncoder::new(1);
+        enc.set_bandwidth(Bandwidth::WideBand);
+        enc.set_bitrate(Some(40_000)); // high target...
+        let mut dec = OpusDecoder::new(1);
+        for f in 0..8 {
+            // A rich signal that codes large at 40 kbps.
+            let pcm: Vec<f32> = (0..960)
+                .map(|i| {
+                    let t = (f * 960 + i) as f32 / 48_000.0;
+                    0.4 * (2.0 * core::f32::consts::PI * 300.0 * t).sin()
+                        + 0.3 * (2.0 * core::f32::consts::PI * 1700.0 * t).sin()
+                        + 0.2 * (2.0 * core::f32::consts::PI * 5300.0 * t).sin()
+                })
+                .collect();
+            // ...but cap the packet well below what 40 kbps would produce.
+            let packet = enc.encode_silk(&pcm, 90).expect("rate-controlled encode");
+            assert!(packet.len() <= 90, "packet {} exceeds the 90-byte cap", packet.len());
+            let out = dec.decode_packet(&packet).expect("decode");
+            assert_eq!(out.len(), 960);
+            assert_eq!(dec.final_range(), enc.final_range(), "range mismatch frame {f}");
         }
     }
 
