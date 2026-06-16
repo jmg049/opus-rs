@@ -835,15 +835,19 @@ impl CeltEncoder {
                         qi = qi.max(-1);
                     }
                 }
-                let qi = if budget - tell >= 15 {
+                // Signed, like the reference: in hybrid mode `tell` can already
+                // exceed `budget` (CELT continues after SILK), so an unsigned
+                // `budget - tell` would underflow.
+                let avail = i64::from(budget) - i64::from(tell);
+                let qi = if avail >= 15 {
                     let pi = 2 * i.min(20);
                     ec_laplace_encode(enc, qi, u32::from(prob[pi]) << 7, u32::from(prob[pi + 1]) << 6)
-                } else if budget - tell >= 2 {
+                } else if avail >= 2 {
                     let qi = qi.clamp(-1, 1);
                     const SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
                     enc.encode_icdf(((2 * qi) ^ -i32::from(qi < 0)) as usize, &SMALL_ENERGY_ICDF, 2);
                     qi
-                } else if budget - tell >= 1 {
+                } else if avail >= 1 {
                     let qi = qi.min(0);
                     enc.encode_bit_logp(qi != 0, 1);
                     qi

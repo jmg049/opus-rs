@@ -456,7 +456,11 @@ impl OpusEncoder {
         // CELT high band into the same coder.
         self.celt.encode_hybrid_into(&mut enc, pcm, nb_bytes, celt_end);
         self.last_final_range = enc.range_size();
-        let payload = enc.finalize().expect("hybrid packet fits");
+        // A loud frame whose SILK low band overruns its share can leave the
+        // CELT high band no room within `nb_bytes`; surface that as a budget
+        // error rather than panicking (the hybrid SILK/CELT rate split is not
+        // yet adaptive - see the encoder notes).
+        let payload = enc.finalize().map_err(|_| EncodeError::InvalidBudget)?;
 
         let config = config_base + lm;
         let toc = (config << 3) | (u8::from(self.channels == 2) << 2); // code 0
@@ -664,6 +668,37 @@ mod tests {
         // collapses some stereo width, so it is well below 1).
         assert!(!saw_mismatch, "stereo SILK range mismatch through OpusDecoder");
         assert!(last_corr > 0.5, "stereo correlation {last_corr:.3} too low");
+    }
+
+    /// A loud signal in hybrid mode at a very tight budget makes the SILK low
+    /// band overrun the CELT high band's share. The coarse-energy quantiser
+    /// then sees the range coder already past `budget` - which must not panic
+    /// (it once underflowed an unsigned `budget - tell`); the call returns a
+    /// budget error or a valid packet, never crashes, and any packet produced
+    /// round-trips through `OpusDecoder` with the matching range.
+    #[test]
+    fn hybrid_tight_budget_does_not_panic_on_overrun() {
+        let mut seed = 0xC0FF_EE11u32;
+        for &bw in &[Bandwidth::SuperWideBand, Bandwidth::FullBand] {
+            let mut enc = OpusEncoder::new(1);
+            enc.set_bandwidth(bw);
+            enc.set_bitrate(Some(8_000)); // forces a tiny hybrid byte budget
+            let mut dec = OpusDecoder::new(1);
+            for _ in 0..6 {
+                // Loud, broadband noise: large SILK low band, stresses the split.
+                let pcm: Vec<f32> = (0..960)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                        ((seed >> 9) as f32 / f32::from(u16::MAX) - 0.5) * 1.9
+                    })
+                    .collect();
+                if let Ok(packet) = enc.encode_hybrid(&pcm, 1275) {
+                    let out = dec.decode_packet(&packet).expect("decode");
+                    assert_eq!(out.len(), 960);
+                    assert_eq!(dec.final_range(), enc.final_range(), "range mismatch {bw:?}");
+                }
+            }
+        }
     }
 
     /// `encode_auto` dispatches to a valid mode for each frame size / bitrate
