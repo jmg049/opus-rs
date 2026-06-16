@@ -84,6 +84,9 @@ pub struct OpusEncoder {
     target_bitrate: Option<u32>,
     /// Range state after the last packet, from whichever coder produced it.
     last_final_range: u32,
+    /// Per-channel DC-reject high-pass filter state (`hp_mem`), carried across
+    /// frames so the 3 Hz high-pass is continuous.
+    hp_mem: [f32; 2],
 }
 
 impl OpusEncoder {
@@ -103,7 +106,31 @@ impl OpusEncoder {
             silk_stereo: None,
             target_bitrate: None,
             last_final_range: 0,
+            hp_mem: [0.0; 2],
         }
+    }
+
+    /// libopus `dc_reject`: a 3 Hz one-pole high-pass on the interleaved
+    /// 48 kHz input, run before every encode to strip DC and sub-audible
+    /// rumble. The per-channel state (`hp_mem`) persists across frames.
+    fn dc_reject(&mut self, pcm: &[f32]) -> Vec<f32> {
+        const CUTOFF_HZ: f32 = 3.0;
+        const COEF: f32 = 6.3 * CUTOFF_HZ / 48_000.0;
+        let coef2 = 1.0 - COEF;
+        let ch = self.channels;
+        let mut out = vec![0.0f32; pcm.len()];
+        for c in 0..ch {
+            let mut m = self.hp_mem[c];
+            let mut i = c;
+            while i < pcm.len() {
+                let x = pcm[i];
+                out[i] = x - m;
+                m = COEF * x + coef2 * m;
+                i += ch;
+            }
+            self.hp_mem[c] = m;
+        }
+        out
     }
 
     /// Restricts the coded audio bandwidth (`OPUS_SET_BANDWIDTH`). The CELT
@@ -205,7 +232,8 @@ impl OpusEncoder {
         let config = config_base + lm;
         let toc = (config << 3) | (u8::from(self.channels == 2) << 2);
 
-        let payload = self.celt.encode_frame_bw(pcm, max_bytes - 1, end);
+        let pcm = self.dc_reject(pcm);
+        let payload = self.celt.encode_frame_bw(&pcm, max_bytes - 1, end);
         self.last_final_range = self.celt.final_range();
         let mut packet = Vec::with_capacity(payload.len() + 1);
         packet.push(toc);
@@ -255,6 +283,9 @@ impl OpusEncoder {
         };
         let nb_subfr = if frame_ms == 10 { 2 } else { 4 };
         let bitrate = self.target_bitrate.map_or(20_000, |b| b as i32);
+
+        let pcm = self.dc_reject(pcm);
+        let pcm = pcm.as_slice();
 
         // 48 kHz f32 → i16.
         let to_i16 = |v: f32| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
@@ -367,6 +398,9 @@ impl OpusEncoder {
         let to_i16 = |v: f32| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
         let internal_len = per_ch / 3; // 48 kHz → 16 kHz
 
+        let pcm = self.dc_reject(pcm);
+        let pcm = pcm.as_slice();
+
         let mut enc = RangeEncoder::new(nb_bytes);
         if self.channels == 1 {
             // SILK low band: WB (16 kHz) resample, then write into the coder.
@@ -438,6 +472,26 @@ mod tests {
     use super::*;
     use crate::OpusDecoder;
     use alloc::vec::Vec;
+
+    /// The DC-reject high-pass strips a constant input: a pure-DC signal of
+    /// 0.3 decodes to a near-zero mean (the 3 Hz high-pass removes it before
+    /// coding), rather than reproducing the offset.
+    #[test]
+    fn dc_reject_removes_a_constant_offset() {
+        let mut enc = OpusEncoder::new(1);
+        enc.set_bandwidth(Bandwidth::WideBand);
+        enc.set_bitrate(Some(20_000));
+        let mut dec = OpusDecoder::new(1);
+        let mut mean = 0.0f64;
+        for _ in 0..12 {
+            let pcm = alloc::vec![0.3f32; 960];
+            let pkt = enc.encode_silk(&pcm, 1275).expect("encode");
+            let out = dec.decode_packet(&pkt).expect("decode");
+            mean = out.iter().map(|&v| f64::from(v)).sum::<f64>() / out.len() as f64;
+            assert_eq!(dec.final_range(), enc.final_range());
+        }
+        assert!(mean.abs() < 0.03, "DC not rejected: residual mean {mean:.4}");
+    }
 
     /// Exercise the full encode surface with pathological signals - silence,
     /// DC, full-scale, impulses, white-ish noise, decorrelated stereo - across
