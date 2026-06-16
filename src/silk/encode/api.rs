@@ -66,9 +66,33 @@ impl SilkEncoder {
             !input.is_empty() && input.len() % frame_length == 0,
             "input must be a whole number of frames"
         );
+        let mut enc = RangeEncoder::new(1275);
+        self.encode_into(&mut enc, input);
+        self.final_range = enc.range_size();
+        // `finalize` returns the full allocated buffer; shrink to the bytes the
+        // coder actually used (SILK is purely range-coded, no raw-bit tail) so
+        // the payload is the real frame size.
+        let bits = (enc.tell_frac() as usize + 7) >> 3;
+        let nbytes = bits.div_ceil(8).max(2);
+        enc.shrink(nbytes);
+        enc.finalize().expect("SILK packet fits the range coder")
+    }
+
+    /// Writes the SILK header and frames for `input` into the shared range
+    /// coder `enc`, without finalising it (for hybrid packets, where CELT
+    /// continues in the same coder). Does not record `final_range`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input` is not a whole number of frames.
+    pub fn encode_into(&mut self, enc: &mut RangeEncoder, input: &[i16]) {
+        let frame_length = self.ch.nb_subfr * 5 * self.ch.fs_khz as usize;
+        assert!(
+            !input.is_empty() && input.len() % frame_length == 0,
+            "input must be a whole number of frames"
+        );
         let n_frames = input.len() / frame_length;
 
-        let mut enc = RangeEncoder::new(1275);
         // Header: per-frame VAD flags (all active) then the LBRR flag (no FEC).
         for _ in 0..n_frames {
             enc.encode_bit_logp(true, 1);
@@ -84,16 +108,8 @@ impl SilkEncoder {
                 CondCoding::Conditionally
             };
             self.ch
-                .encode_frame(&mut enc, &input[i * frame_length..(i + 1) * frame_length], cond);
+                .encode_frame(enc, &input[i * frame_length..(i + 1) * frame_length], cond);
         }
-        self.final_range = enc.range_size();
-        // `finalize` returns the full allocated buffer; shrink to the bytes the
-        // coder actually used (SILK is purely range-coded, no raw-bit tail) so
-        // the payload is the real frame size.
-        let bits = (enc.tell_frac() as usize + 7) >> 3;
-        let nbytes = bits.div_ceil(8).max(2);
-        enc.shrink(nbytes);
-        enc.finalize().expect("SILK packet fits the range coder")
     }
 }
 

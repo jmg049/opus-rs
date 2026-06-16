@@ -173,6 +173,14 @@ impl CeltEncoder {
         enc.finalize().expect("budget enforced by construction")
     }
 
+    /// Encodes the high band (bands `17..end`) of a hybrid packet into the
+    /// shared range coder `enc`, which SILK has already written to. Does not
+    /// finalise. `nb_bytes` is the whole packet's byte budget; the allocation
+    /// derives CELT's share from the bits SILK already spent.
+    pub(crate) fn encode_hybrid_into(&mut self, enc: &mut RangeEncoder, pcm: &[f32], nb_bytes: usize, end: usize) {
+        self.encode_core(enc, pcm, 17, end, nb_bytes, false);
+    }
+
     /// Encodes CELT bands `start..end` into the (possibly shared) range coder
     /// `enc`, without creating or finalising it. With `start == 0` this is the
     /// CELT-only path; with `start == 17` it is the high band of a hybrid

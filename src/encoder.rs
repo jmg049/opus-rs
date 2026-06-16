@@ -8,14 +8,16 @@
 //! SILK internal rate and coded by [`crate::silk::SilkEncoder`]. The heavy
 //! lifting is in [`crate::celt::encoder::CeltEncoder`] and the SILK encode
 //! modules; this layer chooses the TOC byte and frames a conformant Opus
-//! packet. [`OpusEncoder::encode_auto`] picks SILK or CELT per frame from the
-//! frame size and target bitrate. Hybrid mode (SILK+CELT in one packet) is
-//! the remaining mode.
+//! packet. [`OpusEncoder::encode_hybrid`] produces **hybrid** packets (SILK
+//! wideband low band + CELT high band in one shared coder, super-wideband or
+//! fullband), and [`OpusEncoder::encode_auto`] picks SILK or CELT per frame
+//! from the frame size and target bitrate.
 
 use alloc::vec::Vec;
 
 use crate::celt::encoder::CeltEncoder;
 use crate::packet::Bandwidth;
+use crate::range::RangeEncoder;
 
 /// Errors returned by [`OpusEncoder::encode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +314,91 @@ impl OpusEncoder {
         packet.extend_from_slice(&payload);
         Ok(packet)
     }
+
+    /// Encodes one frame as a **hybrid** Opus packet (mono, 10/20 ms,
+    /// super-wideband or fullband): SILK codes the wideband low band and CELT
+    /// the high band (bands 17..end) in a single shared range coder. `pcm` is
+    /// interleaved 48 kHz f32.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidFrameSize`] unless mono, a 10/20 ms frame, and
+    /// the bandwidth is super-wideband or fullband; [`EncodeError::
+    /// InvalidBudget`] if `max_bytes` is outside `3..=1275`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coded packet does not fit the chosen byte budget (it does
+    /// not for in-range input).
+    pub fn encode_hybrid(&mut self, pcm: &[f32], max_bytes: usize) -> Result<Vec<u8>, EncodeError> {
+        if self.channels != 1 {
+            return Err(EncodeError::InvalidFrameSize);
+        }
+        let (frame_ms, lm) = match pcm.len() {
+            480 => (10usize, 0u8),
+            960 => (20, 1),
+            _ => return Err(EncodeError::InvalidFrameSize),
+        };
+        let (config_base, celt_end) = match self.bandwidth {
+            Bandwidth::SuperWideBand => (12u8, 19usize),
+            Bandwidth::FullBand => (14, 21),
+            _ => return Err(EncodeError::InvalidFrameSize),
+        };
+        if !(3..=1275).contains(&max_bytes) {
+            return Err(EncodeError::InvalidBudget);
+        }
+
+        let nb_subfr = if frame_ms == 10 { 2 } else { 4 };
+        // Total packet budget from the target bitrate (CBR-filled), and a
+        // modest SILK share that leaves room for the CELT high band.
+        let target = self.target_bitrate.map_or(32_000, |b| b as i32);
+        let nb_bytes = ((target * frame_ms as i32 / 8000) as usize).clamp(20, max_bytes);
+        let silk_bps = (target / 2).clamp(8_000, 20_000);
+
+        // SILK low band: WB (16 kHz) resample, then write into the coder.
+        let need_new = self
+            .silk
+            .as_ref()
+            .is_none_or(|(_, _, khz, nbs)| *khz != 16 || *nbs != nb_subfr);
+        if need_new {
+            self.silk = Some((
+                crate::silk::encode::api::SilkEncoder::new(16, nb_subfr),
+                crate::silk::resampler::Resampler::new_enc(48_000, 16_000),
+                16,
+                nb_subfr,
+            ));
+        }
+        let mut enc = RangeEncoder::new(nb_bytes);
+        {
+            let (silk, resampler, _, _) = self.silk.as_mut().expect("configured");
+            silk.set_bitrate(silk_bps);
+            let in16: Vec<i16> = pcm
+                .iter()
+                .map(|&v| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16)
+                .collect();
+            let mut internal = vec![0i16; pcm.len() / 3];
+            resampler.process(&mut internal, &in16);
+            silk.encode_into(&mut enc, &internal);
+        }
+
+        // Redundancy flag (no redundant CELT frame), coded when there is room.
+        let total_bits = (nb_bytes * 8) as u32;
+        if enc.tell() + 37 <= total_bits {
+            enc.encode_bit_logp(false, 12);
+        }
+
+        // CELT high band into the same coder.
+        self.celt.encode_hybrid_into(&mut enc, pcm, nb_bytes, celt_end);
+        self.last_final_range = enc.range_size();
+        let payload = enc.finalize().expect("hybrid packet fits");
+
+        let config = config_base + lm;
+        let toc = config << 3; // mono, code 0
+        let mut packet = Vec::with_capacity(payload.len() + 1);
+        packet.push(toc);
+        packet.extend_from_slice(&payload);
+        Ok(packet)
+    }
 }
 
 #[cfg(test)]
@@ -455,6 +542,52 @@ mod tests {
             let toc = last_packet.unwrap()[0];
             let is_silk = (toc >> 3) < 12;
             assert_eq!(is_silk, want_silk, "mode for spf={spf} bw={bw:?} br={br:?}");
+        }
+    }
+
+    /// A hybrid Opus packet (SILK low band + CELT high band, one coder)
+    /// decodes through `OpusDecoder` with the final range matching, for
+    /// super-wideband and fullband.
+    #[test]
+    fn hybrid_packet_round_trips_through_the_opus_decoder() {
+        for &bw in &[Bandwidth::SuperWideBand, Bandwidth::FullBand] {
+            let mut enc = OpusEncoder::new(1);
+            enc.set_bandwidth(bw);
+            enc.set_bitrate(Some(32_000));
+            let mut dec = OpusDecoder::new(1);
+            let mut last_corr = 0.0f64;
+            for f in 0..6 {
+                let pcm: Vec<f32> = (0..960)
+                    .map(|i| {
+                        let t = (f * 960 + i) as f32 / 48_000.0;
+                        0.3 * (2.0 * core::f32::consts::PI * 300.0 * t).sin()
+                            + 0.15 * (2.0 * core::f32::consts::PI * 9000.0 * t).sin()
+                    })
+                    .collect();
+                let packet = enc.encode_hybrid(&pcm, 1275).expect("hybrid encode");
+                assert_eq!(packet[0] >> 3, if bw == Bandwidth::SuperWideBand { 13 } else { 15 });
+                let out = dec.decode_packet(&packet).expect("decode");
+                assert_eq!(out.len(), 960);
+                assert_eq!(
+                    dec.final_range(),
+                    enc.final_range(),
+                    "hybrid range mismatch {bw:?} frame {f}"
+                );
+                last_corr = (0..700usize)
+                    .map(|d| {
+                        let (mut s, mut dot, mut e) = (0.0f64, 0.0f64, 0.0f64);
+                        for i in 0..960 - d {
+                            let a = f64::from(pcm[i]);
+                            let b = f64::from(out[i + d]);
+                            s += a * a;
+                            dot += a * b;
+                            e += b * b;
+                        }
+                        dot / (s.sqrt() * e.sqrt()).max(1e-9)
+                    })
+                    .fold(0.0f64, f64::max);
+            }
+            assert!(last_corr > 0.7, "{bw:?} hybrid correlation {last_corr:.3} too low");
         }
     }
 
