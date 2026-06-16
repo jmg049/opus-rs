@@ -69,9 +69,9 @@ fn corr_matrix(x: &[f32], l: usize, order: usize, xx: &mut [f32]) {
         e += f64::from(x[p1 - j]) * f64::from(x[p1 - j]) - f64::from(x[p1 + l - j]) * f64::from(x[p1 + l - j]);
         xx[j * order + j] = e as f32;
     }
-    // Off-diagonals.
-    let mut p2 = order - 2;
+    // Off-diagonals. `p2` walks back one column per lag: order-2 down to 0.
     for lag in 1..order {
+        let p2 = order - 1 - lag;
         let mut e = inner_product(&x[p1..], &x[p2..], l);
         xx[lag * order] = e as f32;
         xx[lag] = e as f32;
@@ -80,7 +80,6 @@ fn corr_matrix(x: &[f32], l: usize, order: usize, xx: &mut [f32]) {
             xx[(lag + j) * order + j] = e as f32;
             xx[j * order + (lag + j)] = e as f32;
         }
-        p2 -= 1;
     }
 }
 

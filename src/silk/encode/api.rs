@@ -198,6 +198,24 @@ impl SilkStereoEncoder {
     /// frames, or if the packet does not fit the range coder.
     #[must_use]
     pub fn encode(&mut self, left: &[i16], right: &[i16]) -> Vec<u8> {
+        let mut enc = RangeEncoder::new(1275);
+        self.encode_into(&mut enc, left, right);
+        self.final_range = enc.range_size();
+        let bits = (enc.tell_frac() as usize + 7) >> 3;
+        let nbytes = bits.div_ceil(8).max(2);
+        enc.shrink(nbytes);
+        enc.finalize().expect("SILK stereo packet fits the range coder")
+    }
+
+    /// Writes the stereo SILK header and frames into the shared range coder
+    /// `enc`, without finalising it (for hybrid packets). Does not record
+    /// `final_range`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the channels differ in length or are not a whole number of
+    /// frames.
+    pub fn encode_into(&mut self, enc: &mut RangeEncoder, left: &[i16], right: &[i16]) {
         let fl = self.nb_subfr * 5 * self.fs_khz as usize;
         assert_eq!(left.len(), right.len(), "channel length mismatch");
         assert!(!left.is_empty() && left.len() % fl == 0, "whole frames");
@@ -243,7 +261,6 @@ impl SilkStereoEncoder {
             });
         }
 
-        let mut enc = RangeEncoder::new(1275);
         // Header: ch0 (mid) VAD flags (all active) + LBRR, then ch1 (side)
         // VAD flags (active iff the side is coded) + LBRR.
         for _ in 0..n_frames {
@@ -256,9 +273,9 @@ impl SilkStereoEncoder {
         enc.encode_bit_logp(false, 1);
 
         for (i, fd) in frames.iter().enumerate() {
-            stereo_encode_pred(&mut enc, &fd.ix);
+            stereo_encode_pred(&mut *enc, &fd.ix);
             if fd.mid_only {
-                stereo_encode_mid_only(&mut enc, 1);
+                stereo_encode_mid_only(&mut *enc, 1);
             }
             let mid_cond = if i == 0 {
                 CondCoding::Independently
@@ -266,7 +283,7 @@ impl SilkStereoEncoder {
                 CondCoding::Conditionally
             };
             self.mid.set_bitrate(fd.rates[0]);
-            self.mid.encode_frame(&mut enc, &fd.mid, mid_cond);
+            self.mid.encode_frame(&mut *enc, &fd.mid, mid_cond);
             if !fd.mid_only {
                 if self.prev_mid_only {
                     self.side.reset_side_prediction();
@@ -279,16 +296,10 @@ impl SilkStereoEncoder {
                     CondCoding::Conditionally
                 };
                 self.side.set_bitrate(fd.rates[1]);
-                self.side.encode_frame(&mut enc, &fd.side, side_cond);
+                self.side.encode_frame(&mut *enc, &fd.side, side_cond);
             }
             self.prev_mid_only = fd.mid_only;
         }
-
-        self.final_range = enc.range_size();
-        let bits = (enc.tell_frac() as usize + 7) >> 3;
-        let nbytes = bits.div_ceil(8).max(2);
-        enc.shrink(nbytes);
-        enc.finalize().expect("SILK stereo packet fits the range coder")
     }
 }
 

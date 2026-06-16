@@ -151,13 +151,10 @@ impl OpusEncoder {
                     Bandwidth::NarrowBand | Bandwidth::MediumBand | Bandwidth::WideBand
                 );
                 let swb_or_fb = matches!(self.bandwidth, Bandwidth::SuperWideBand | Bandwidth::FullBand);
-                if self.channels == 1 && wb_or_below && self.target_bitrate.is_some_and(|b| b <= 24_000) {
+                if wb_or_below && self.target_bitrate.is_some_and(|b| b <= 24_000) {
                     self.encode_silk(pcm, max_bytes)
-                } else if self.channels == 1 && swb_or_fb && self.target_bitrate.is_some_and(|b| b <= 40_000) {
+                } else if swb_or_fb && self.target_bitrate.is_some_and(|b| b <= 40_000) {
                     self.encode_hybrid(pcm, max_bytes)
-                } else if wb_or_below && self.target_bitrate.is_some_and(|b| b <= 24_000) {
-                    // Stereo speech (no stereo hybrid yet): SILK stereo.
-                    self.encode_silk(pcm, max_bytes)
                 } else {
                     self.encode(pcm, max_bytes)
                 }
@@ -327,26 +324,27 @@ impl OpusEncoder {
         Ok(packet)
     }
 
-    /// Encodes one frame as a **hybrid** Opus packet (mono, 10/20 ms,
+    /// Encodes one frame as a **hybrid** Opus packet (mono or stereo, 10/20 ms,
     /// super-wideband or fullband): SILK codes the wideband low band and CELT
     /// the high band (bands 17..end) in a single shared range coder. `pcm` is
     /// interleaved 48 kHz f32.
     ///
     /// # Errors
     ///
-    /// [`EncodeError::InvalidFrameSize`] unless mono, a 10/20 ms frame, and
-    /// the bandwidth is super-wideband or fullband; [`EncodeError::
-    /// InvalidBudget`] if `max_bytes` is outside `3..=1275`.
+    /// [`EncodeError::InvalidFrameSize`] unless a 10/20 ms frame and the
+    /// bandwidth is super-wideband or fullband; [`EncodeError::InvalidBudget`]
+    /// if `max_bytes` is outside `3..=1275`.
     ///
     /// # Panics
     ///
     /// Panics if the coded packet does not fit the chosen byte budget (it does
     /// not for in-range input).
     pub fn encode_hybrid(&mut self, pcm: &[f32], max_bytes: usize) -> Result<Vec<u8>, EncodeError> {
-        if self.channels != 1 {
+        if self.channels == 0 || pcm.len() % self.channels != 0 {
             return Err(EncodeError::InvalidFrameSize);
         }
-        let (frame_ms, lm) = match pcm.len() {
+        let per_ch = pcm.len() / self.channels;
+        let (frame_ms, lm) = match per_ch {
             480 => (10usize, 0u8),
             960 => (20, 1),
             _ => return Err(EncodeError::InvalidFrameSize),
@@ -366,31 +364,53 @@ impl OpusEncoder {
         let target = self.target_bitrate.map_or(32_000, |b| b as i32);
         let nb_bytes = ((target * frame_ms as i32 / 8000) as usize).clamp(20, max_bytes);
         let silk_bps = (target / 2).clamp(8_000, 20_000);
+        let to_i16 = |v: f32| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+        let internal_len = per_ch / 3; // 48 kHz → 16 kHz
 
-        // SILK low band: WB (16 kHz) resample, then write into the coder.
-        let need_new = self
-            .silk
-            .as_ref()
-            .is_none_or(|(_, _, khz, nbs)| *khz != 16 || *nbs != nb_subfr);
-        if need_new {
-            self.silk = Some((
-                crate::silk::encode::api::SilkEncoder::new(16, nb_subfr),
-                crate::silk::resampler::Resampler::new_enc(48_000, 16_000),
-                16,
-                nb_subfr,
-            ));
-        }
         let mut enc = RangeEncoder::new(nb_bytes);
-        {
+        if self.channels == 1 {
+            // SILK low band: WB (16 kHz) resample, then write into the coder.
+            let need_new = self
+                .silk
+                .as_ref()
+                .is_none_or(|(_, _, khz, nbs)| *khz != 16 || *nbs != nb_subfr);
+            if need_new {
+                self.silk = Some((
+                    crate::silk::encode::api::SilkEncoder::new(16, nb_subfr),
+                    crate::silk::resampler::Resampler::new_enc(48_000, 16_000),
+                    16,
+                    nb_subfr,
+                ));
+            }
             let (silk, resampler, _, _) = self.silk.as_mut().expect("configured");
             silk.set_bitrate(silk_bps);
-            let in16: Vec<i16> = pcm
-                .iter()
-                .map(|&v| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16)
-                .collect();
-            let mut internal = vec![0i16; pcm.len() / 3];
+            let in16: Vec<i16> = pcm.iter().map(|&v| to_i16(v)).collect();
+            let mut internal = vec![0i16; internal_len];
             resampler.process(&mut internal, &in16);
             silk.encode_into(&mut enc, &internal);
+        } else {
+            // Stereo SILK low band: deinterleave, resample each channel to WB.
+            let need_new = self
+                .silk_stereo
+                .as_ref()
+                .is_none_or(|(_, _, _, khz, nbs)| *khz != 16 || *nbs != nb_subfr);
+            if need_new {
+                self.silk_stereo = Some((
+                    crate::silk::encode::api::SilkStereoEncoder::new(16, nb_subfr),
+                    crate::silk::resampler::Resampler::new_enc(48_000, 16_000),
+                    crate::silk::resampler::Resampler::new_enc(48_000, 16_000),
+                    16,
+                    nb_subfr,
+                ));
+            }
+            let (silk, rl, rr, _, _) = self.silk_stereo.as_mut().expect("configured");
+            silk.set_bitrate(silk_bps);
+            let l16: Vec<i16> = pcm.iter().step_by(2).map(|&v| to_i16(v)).collect();
+            let r16: Vec<i16> = pcm.iter().skip(1).step_by(2).map(|&v| to_i16(v)).collect();
+            let (mut li, mut ri) = (vec![0i16; internal_len], vec![0i16; internal_len]);
+            rl.process(&mut li, &l16);
+            rr.process(&mut ri, &r16);
+            silk.encode_into(&mut enc, &li, &ri);
         }
 
         // Redundancy flag (no redundant CELT frame), coded when there is room.
@@ -405,7 +425,7 @@ impl OpusEncoder {
         let payload = enc.finalize().expect("hybrid packet fits");
 
         let config = config_base + lm;
-        let toc = config << 3; // mono, code 0
+        let toc = (config << 3) | (u8::from(self.channels == 2) << 2); // code 0
         let mut packet = Vec::with_capacity(payload.len() + 1);
         packet.push(toc);
         packet.extend_from_slice(&payload);
@@ -636,6 +656,45 @@ mod tests {
                     .fold(0.0f64, f64::max);
             }
             assert!(last_corr > 0.7, "{bw:?} hybrid correlation {last_corr:.3} too low");
+        }
+    }
+
+    /// A stereo hybrid Opus packet (SILK stereo low band + CELT stereo high
+    /// band sharing one coder) decodes through `OpusDecoder` with the final
+    /// range matching, for super-wideband and fullband.
+    #[test]
+    fn stereo_hybrid_packet_round_trips_through_the_opus_decoder() {
+        for &bw in &[Bandwidth::SuperWideBand, Bandwidth::FullBand] {
+            let mut enc = OpusEncoder::new(2);
+            enc.set_bandwidth(bw);
+            enc.set_bitrate(Some(48_000));
+            let mut dec = OpusDecoder::new(2);
+            for f in 0..6 {
+                let mut pcm = Vec::with_capacity(960 * 2);
+                for i in 0..960 {
+                    let t = (f * 960 + i) as f32 / 48_000.0;
+                    // Slightly decorrelated channels (phase-shifted) to exercise
+                    // the side band.
+                    let l = 0.3 * (2.0 * core::f32::consts::PI * 300.0 * t).sin()
+                        + 0.15 * (2.0 * core::f32::consts::PI * 9000.0 * t).sin();
+                    let r = 0.3 * (2.0 * core::f32::consts::PI * 300.0 * t + 0.5).sin()
+                        + 0.15 * (2.0 * core::f32::consts::PI * 9000.0 * t).sin();
+                    pcm.push(l);
+                    pcm.push(r);
+                }
+                let packet = enc.encode_hybrid(&pcm, 1275).expect("stereo hybrid encode");
+                let config = packet[0] >> 3;
+                let stereo = (packet[0] >> 2) & 1;
+                assert_eq!(config, if bw == Bandwidth::SuperWideBand { 13 } else { 15 });
+                assert_eq!(stereo, 1, "stereo bit set");
+                let out = dec.decode_packet(&packet).expect("decode");
+                assert_eq!(out.len(), 960 * 2);
+                assert_eq!(
+                    dec.final_range(),
+                    enc.final_range(),
+                    "stereo hybrid range mismatch {bw:?} frame {f}"
+                );
+            }
         }
     }
 

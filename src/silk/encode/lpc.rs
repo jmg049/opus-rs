@@ -140,8 +140,8 @@ pub(crate) fn burg_modified(
         // Update C·Af and C·Ab.
         for k in 0..=n + 1 {
             let t1 = caf[k];
-            caf[k] += rc * cab[n - k + 1];
-            cab[n - k + 1] += rc * t1;
+            caf[k] += rc * cab[n + 1 - k];
+            cab[n + 1 - k] += rc * t1;
         }
     }
 
