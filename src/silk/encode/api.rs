@@ -136,6 +136,28 @@ impl SilkEncoder {
                 .encode_frame(enc, &input[i * frame_length..(i + 1) * frame_length], cond);
         }
     }
+
+    /// Like [`encode_into`](Self::encode_into), but rate-controls so the SILK
+    /// contribution does not exceed `max_bytes`, lowering the coding SNR and
+    /// re-trying on a clone until it fits (or the 6 kb/s floor is reached).
+    /// The hybrid path uses this to reserve room for the CELT high band so a
+    /// loud frame cannot starve it. The encoder state advances exactly once.
+    pub fn encode_into_capped(&mut self, enc: &mut RangeEncoder, input: &[i16], max_bytes: usize) {
+        let mut bps = self.ch.target_rate_bps;
+        for _ in 0..12 {
+            let mut probe = self.clone();
+            probe.set_bitrate(bps);
+            let mut tmp = RangeEncoder::new(1275);
+            probe.encode_into(&mut tmp, input);
+            let bits = (tmp.tell_frac() as usize + 7) >> 3;
+            if bits.div_ceil(8) <= max_bytes || bps <= 6_000 {
+                break;
+            }
+            bps = (bps * 3 / 4).max(6_000);
+        }
+        self.set_bitrate(bps);
+        self.encode_into(enc, input);
+    }
 }
 
 /// A SILK encoder for one stereo stream (mid/side coding).

@@ -46,6 +46,41 @@ impl core::fmt::Display for EncodeError {
 #[cfg(feature = "std")]
 impl std::error::Error for EncodeError {}
 
+/// The SILK low-band target bitrate for a hybrid packet at total `rate` bps
+/// (`compute_silk_rate_for_hybrid`): the reference's per-channel rate table
+/// (no-FEC column - 10 ms and 20 ms coincide there), interpolated, with the
+/// +300 bps super-wideband nudge. CELT codes the rest.
+fn compute_silk_rate_for_hybrid(rate: i32, swb: bool, channels: i32) -> i32 {
+    // (total per-channel bps, SILK bps).
+    const TABLE: [(i32, i32); 7] = [
+        (0, 0),
+        (12_000, 10_000),
+        (16_000, 13_500),
+        (20_000, 16_000),
+        (24_000, 18_000),
+        (32_000, 22_000),
+        (64_000, 38_000),
+    ];
+    let per_ch = rate / channels.max(1);
+    let n = TABLE.len();
+    let mut i = 1;
+    while i < n && TABLE[i].0 <= per_ch {
+        i += 1;
+    }
+    let mut silk_rate = if i == n {
+        // Above the table: give 50% of the extra bits to SILK.
+        TABLE[n - 1].1 + (per_ch - TABLE[n - 1].0) / 2
+    } else {
+        let (x0, lo) = TABLE[i - 1];
+        let (x1, hi) = TABLE[i];
+        (lo * (x1 - per_ch) + hi * (per_ch - x0)) / (x1 - x0)
+    };
+    if swb {
+        silk_rate += 300;
+    }
+    silk_rate * channels.max(1)
+}
+
 /// A pure-Rust Opus encoder at 48 kHz, producing CELT, SILK (mono/stereo) and
 /// hybrid packets; [`encode_auto`](Self::encode_auto) chooses the mode.
 ///
@@ -181,7 +216,11 @@ impl OpusEncoder {
                 if wb_or_below && self.target_bitrate.is_some_and(|b| b <= 24_000) {
                     self.encode_silk(pcm, max_bytes)
                 } else if swb_or_fb && self.target_bitrate.is_some_and(|b| b <= 40_000) {
+                    // Fall back to CELT-only for a frame whose hybrid SILK low
+                    // band cannot be squeezed under its byte share (a rare loud
+                    // transient), so the "just works" path never fails.
                     self.encode_hybrid(pcm, max_bytes)
+                        .or_else(|_| self.encode(pcm, max_bytes))
                 } else {
                     self.encode(pcm, max_bytes)
                 }
@@ -390,11 +429,16 @@ impl OpusEncoder {
         }
 
         let nb_subfr = if frame_ms == 10 { 2 } else { 4 };
-        // Total packet budget from the target bitrate (CBR-filled), and a
-        // modest SILK share that leaves room for the CELT high band.
+        // Total packet budget from the target bitrate, the SILK low-band rate
+        // (libopus's hybrid SILK/CELT split table), and the byte share SILK may
+        // use so the CELT high band always has room (`celt_floor`, scaled by
+        // the number of high bands it codes).
         let target = self.target_bitrate.map_or(32_000, |b| b as i32);
         let nb_bytes = ((target * frame_ms as i32 / 8000) as usize).clamp(20, max_bytes);
-        let silk_bps = (target / 2).clamp(8_000, 20_000);
+        let swb = matches!(self.bandwidth, Bandwidth::SuperWideBand);
+        let silk_bps = compute_silk_rate_for_hybrid(target, swb, self.channels as i32);
+        let celt_floor = (celt_end - 17) * 4 + 4;
+        let silk_cap = nb_bytes.saturating_sub(celt_floor).max(8);
         let to_i16 = |v: f32| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
         let internal_len = per_ch / 3; // 48 kHz → 16 kHz
 
@@ -403,7 +447,8 @@ impl OpusEncoder {
 
         let mut enc = RangeEncoder::new(nb_bytes);
         if self.channels == 1 {
-            // SILK low band: WB (16 kHz) resample, then write into the coder.
+            // SILK low band: WB (16 kHz) resample, then write into the coder,
+            // capped so the CELT high band keeps at least `celt_floor` bytes.
             let need_new = self
                 .silk
                 .as_ref()
@@ -421,7 +466,7 @@ impl OpusEncoder {
             let in16: Vec<i16> = pcm.iter().map(|&v| to_i16(v)).collect();
             let mut internal = vec![0i16; internal_len];
             resampler.process(&mut internal, &in16);
-            silk.encode_into(&mut enc, &internal);
+            silk.encode_into_capped(&mut enc, &internal, silk_cap);
         } else {
             // Stereo SILK low band: deinterleave, resample each channel to WB.
             let need_new = self
@@ -698,6 +743,38 @@ mod tests {
                     assert_eq!(dec.final_range(), enc.final_range(), "range mismatch {bw:?}");
                 }
             }
+        }
+    }
+
+    /// `encode_auto` at hybrid settings never fails on a codeable frame: a
+    /// loud transient whose SILK low band overruns its byte share falls back to
+    /// CELT-only, and every packet round-trips through `OpusDecoder` with the
+    /// matching range (mode may switch per frame via the TOC).
+    #[test]
+    fn encode_auto_hybrid_falls_back_to_celt_without_failing() {
+        let mut seed = 0x5151_2323u32;
+        let mut enc = OpusEncoder::new(1);
+        enc.set_bandwidth(Bandwidth::FullBand);
+        enc.set_bitrate(Some(32_000)); // routes 20 ms FB to hybrid
+        let mut dec = OpusDecoder::new(1);
+        for f in 0..20 {
+            // Alternate quiet tones with loud broadband bursts (overruns SILK).
+            let loud = f % 4 == 3;
+            let pcm: Vec<f32> = (0..960)
+                .map(|i| {
+                    if loud {
+                        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                        ((seed >> 9) as f32 / f32::from(u16::MAX) - 0.5) * 1.95
+                    } else {
+                        let t = (f * 960 + i) as f32 / 48_000.0;
+                        0.25 * (2.0 * core::f32::consts::PI * 400.0 * t).sin()
+                    }
+                })
+                .collect();
+            let packet = enc.encode_auto(&pcm, 1275).expect("encode_auto never fails");
+            let out = dec.decode_packet(&packet).expect("decode");
+            assert_eq!(out.len(), 960);
+            assert_eq!(dec.final_range(), enc.final_range(), "range mismatch frame {f}");
         }
     }
 

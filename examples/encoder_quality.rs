@@ -90,9 +90,10 @@ fn aligned_snr(reference: &[f32], degraded: &[f32]) -> (usize, f64) {
 }
 
 /// Encodes and decodes `pcm` through our codec at the given config, returning
-/// the decoded signal and the total coded byte count, or `None` if any frame
-/// fails to encode (e.g. the hybrid SILK/CELT split overruns a tight budget).
-fn our_roundtrip(pcm: &[f32], cfg: &Config) -> Option<(Vec<f32>, usize)> {
+/// the decoded signal, total coded byte count, and the number of frames that
+/// fell back to CELT (a hybrid frame whose SILK low band could not be squeezed
+/// under its byte share falls back to CELT-only so the stream stays complete).
+fn our_roundtrip(pcm: &[f32], cfg: &Config) -> (Vec<f32>, usize, usize) {
     let mut enc = OpusEncoder::new(1);
     enc.set_bandwidth(cfg.bw);
     enc.set_bitrate(Some(cfg.bitrate));
@@ -103,17 +104,22 @@ fn our_roundtrip(pcm: &[f32], cfg: &Config) -> Option<(Vec<f32>, usize)> {
 
     let mut out = Vec::with_capacity(pcm.len());
     let mut total = 0usize;
+    let mut fallbacks = 0usize;
     for frame in pcm.chunks_exact(FRAME) {
         let packet = match cfg.mode {
             Mode::Silk => enc.encode_silk(frame, max_bytes),
             Mode::Hybrid => enc.encode_hybrid(frame, max_bytes),
             Mode::Celt => enc.encode(frame, max_bytes),
         }
-        .ok()?;
+        .or_else(|_| {
+            fallbacks += 1;
+            enc.encode(frame, max_bytes)
+        })
+        .expect("our encode (incl. CELT fallback)");
         total += packet.len();
         out.extend_from_slice(&dec.decode_packet(&packet).expect("our decode"));
     }
-    Some((out, total))
+    (out, total, fallbacks)
 }
 
 /// Runs the reference encoder+decoder via `opus_demo`, returning the decoded
@@ -238,23 +244,22 @@ fn main() {
     println!("{}", "-".repeat(72));
 
     for cfg in &configs {
-        let Some((our_out, our_bytes)) = our_roundtrip(&pcm[..n], cfg) else {
-            println!(
-                "{:<14} {:>10} {:>9}   (our encode failed: budget overrun)",
-                cfg.label, "ERR", ""
-            );
-            continue;
-        };
+        let (our_out, our_bytes, fallbacks) = our_roundtrip(&pcm[..n], cfg);
         let (_, our_snr) = aligned_snr(&pcm[..n], &our_out);
         let our_kbps = kbps(our_bytes, n);
         write_pcm_s16le(&format!("/tmp/eq_{}.ours.pcm", cfg.label), &our_out);
+        let note = if fallbacks > 0 {
+            format!("  [{fallbacks} CELT fallback]")
+        } else {
+            String::new()
+        };
 
         match libopus_roundtrip(&input, cfg, &demo) {
             Some((lib_out, lib_bytes)) => {
                 let (_, lib_snr) = aligned_snr(&pcm[..n], &lib_out);
                 let lib_kbps = kbps(lib_bytes, n);
                 println!(
-                    "{:<14} {:>10.1} {:>8.2}dB {:>12.1} {:>7.2}dB   {:>+7.2}",
+                    "{:<14} {:>10.1} {:>8.2}dB {:>12.1} {:>7.2}dB   {:>+7.2}{note}",
                     cfg.label,
                     our_kbps,
                     our_snr,
@@ -265,7 +270,7 @@ fn main() {
             },
             None => {
                 println!(
-                    "{:<14} {:>10.1} {:>8.2}dB {:>12} {:>9}   {:>8}",
+                    "{:<14} {:>10.1} {:>8.2}dB {:>12} {:>9}   {:>8}{note}",
                     cfg.label, our_kbps, our_snr, "n/a", "n/a", "-"
                 );
             },
