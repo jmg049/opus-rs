@@ -519,11 +519,112 @@ impl OpusEncoder {
     }
 }
 
+/// Encodes interleaved 48 kHz f32 PCM into a complete **Ogg Opus** file
+/// (RFC 7845): the `OpusHead`/`OpusTags` headers followed by the audio page
+/// stream, fullband and 20 ms per packet via [`OpusEncoder::encode_auto`].
+/// `channels` is 1 or 2; `bitrate` is the target in bits/s. The final partial
+/// frame is zero-padded. This is the symmetric counterpart to
+/// [`decode_ogg_opus`](crate::decode_ogg_opus) - together they let the codec
+/// read and write standard `.opus` files.
+///
+/// `pre_skip` is fixed at 120 samples, the CELT/hybrid reconstruction delay at
+/// 48 kHz that fullband `encode_auto` always incurs, so the decoder trims the
+/// warm-up and the output aligns with the input.
+///
+/// # Panics
+///
+/// Panics if `channels` is not 1 or 2, or `pcm.len()` is not a multiple of it.
+#[must_use]
+pub fn encode_ogg_opus(pcm: &[f32], channels: usize, bitrate: u32) -> Vec<u8> {
+    use crate::ogg::{OggOpusWriter, OpusHead, OpusTags};
+
+    assert!(channels == 1 || channels == 2, "channels must be 1 or 2");
+    assert!(pcm.len() % channels == 0, "pcm length must be a whole number of frames");
+
+    const FRAME: usize = 960; // 20 ms at 48 kHz
+    const PRE_SKIP: u16 = 120; // CELT/hybrid reconstruction delay (samples @ 48 kHz)
+
+    let head = OpusHead::family0(channels as u8, PRE_SKIP, 48_000);
+    let tags = OpusTags {
+        vendor: b"opus_native".to_vec(),
+        comments: Vec::new(),
+    };
+    let mut writer = OggOpusWriter::new(&head, &tags, 1);
+
+    let per_ch = pcm.len() / channels;
+    if per_ch == 0 {
+        return writer.finish();
+    }
+
+    let mut enc = OpusEncoder::new(channels);
+    enc.set_bandwidth(Bandwidth::FullBand);
+    enc.set_bitrate(Some(bitrate));
+
+    let frame_samples = FRAME * channels;
+    let n_frames = per_ch.div_ceil(FRAME);
+    for f in 0..n_frames {
+        let start = f * frame_samples;
+        let end = (start + frame_samples).min(pcm.len());
+        let mut frame = pcm[start..end].to_vec();
+        frame.resize(frame_samples, 0.0); // zero-pad the final partial frame
+        let packet = enc
+            .encode_auto(&frame, 1275)
+            .expect("encode_auto produces a packet for a 20 ms frame");
+        writer.push(&packet, f + 1 == n_frames);
+    }
+    writer.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::OpusDecoder;
+    use crate::{OpusDecoder, decode_ogg_opus};
     use alloc::vec::Vec;
+
+    /// `encode_ogg_opus` produces a valid Ogg Opus file that `decode_ogg_opus`
+    /// reads back: the header round-trips, the decoded length matches the input
+    /// (within the pre-skip-trimmed tail), and the audio is strongly correlated
+    /// with the input (delay-aligned by the 120-sample pre-skip).
+    #[test]
+    fn ogg_opus_file_round_trips() {
+        for &channels in &[1usize, 2] {
+            // ~0.5 s of a tone, a whole number of 20 ms frames.
+            let per_ch = 960 * 25;
+            let mut pcm = Vec::with_capacity(per_ch * channels);
+            for i in 0..per_ch {
+                let t = i as f32 / 48_000.0;
+                let s = 0.4 * (2.0 * core::f32::consts::PI * 440.0 * t).sin();
+                for _ in 0..channels {
+                    pcm.push(s);
+                }
+            }
+
+            let file = encode_ogg_opus(&pcm, channels, 64_000);
+            let (out, head) = decode_ogg_opus(&file).expect("decode the encoded file");
+            assert_eq!(usize::from(head.channel_count), channels);
+            assert_eq!(head.pre_skip, 120);
+
+            // Output covers the input minus at most the codec tail delay.
+            let out_per_ch = out.len() / channels;
+            assert!(
+                out_per_ch >= per_ch - 960 && out_per_ch <= per_ch + 960,
+                "ch={channels}: decoded {out_per_ch} samples/ch vs input {per_ch}"
+            );
+
+            // Correlation on the first channel (input vs delay-aligned output).
+            let n = out_per_ch.min(per_ch) - 480;
+            let (mut sig, mut dot, mut energy) = (0.0f64, 0.0f64, 0.0f64);
+            for i in 0..n {
+                let a = f64::from(pcm[(480 + i) * channels]);
+                let b = f64::from(out[(480 + i) * channels]);
+                sig += a * a;
+                dot += a * b;
+                energy += b * b;
+            }
+            let corr = dot / (sig.sqrt() * energy.sqrt()).max(1e-9);
+            assert!(corr > 0.9, "ch={channels}: round-trip correlation {corr:.3} too low");
+        }
+    }
 
     /// The DC-reject high-pass strips a constant input: a pure-DC signal of
     /// 0.3 decodes to a near-zero mean (the 3 Hz high-pass removes it before
