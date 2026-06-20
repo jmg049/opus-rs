@@ -97,22 +97,23 @@ We decode speech (SILK/hybrid) faster than SIMD libopus. CELT is closest to
 libopus's SIMD (0.87×) after the table-driven CWRS rewrite; the residual gap is
 the MDCT, where libopus's SIMD still wins.
 
-**Encode** (× realtime). libopus has a complexity knob (0-10); `opus_native`
-sits around complexity 0, so c0 is the fair algorithmic comparison and c10 is
-libopus's default (what callers usually get):
+**Encode** (× realtime). Both encoders have a complexity knob (0-10,
+`set_complexity`); the only fair comparison is at *matched* complexity, so each
+column runs `opus_native` and libopus at the **same** setting:
 
-| Mode | `opus_native` | libopus c0 | libopus c10 (default) |
-|------|---------------|------------|-----------------------|
-| SILK wideband 16 kb/s | **635×** | 720× | 216× |
-| hybrid fullband 32 kb/s | **386×** | 550× | 191× |
-| CELT fullband 64 kb/s | **662×** | 1080× | 430× |
+| Mode | ours c0 | libopus c0 | ours / lib | ours c10 | libopus c10 | ours / lib |
+|------|---------|-----------|-----------|----------|-------------|-----------|
+| SILK wideband 16 kb/s | 642× | 741× | 0.87× | 635× | 214× | **2.97×** |
+| hybrid fullband 32 kb/s | 500× | 555× | 0.90× | 397× | 192× | **2.06×** |
+| CELT fullband 64 kb/s | 1084× | 1090× | **0.99×** | 689× | 438× | **1.57×** |
 
-`opus_native` encodes **faster than libopus at its default complexity on every
-mode** (1.5-2.9×), and reaches 0.61-0.89× of libopus's matched complexity-0
-speed - up from ~0.3-0.5× - after SIMD (AVX2+FMA / SSE2) of the encoder's hot
-loops plus general tuning (latency-hiding in the dot kernels; reverting SIMD
-where a scalar loop was actually faster - measured in cycles, not instruction
-counts):
+At matched complexity-0 we're at parity (CELT 0.99×) to within ~10%; at matched
+complexity-10 we're 1.6-3× faster. (libopus's c10 also enables delayed-decision
+NSQ and warped noise shaping, which `opus_native` does not yet implement, so its
+c10 buys quality we don't spend cycles on - the c0 column is the cleaner
+like-for-like.) This followed SIMD (AVX2+FMA / SSE2) of the encoder's hot loops
+plus general tuning - latency-hiding in the dot kernels, and reverting SIMD
+where a scalar loop measured faster *in cycles* (not instruction counts):
 
 - **CELT**: the PVQ pulse search (SSE2 *and* an AVX2 path libopus doesn't ship);
   the pre-filter pitch analysis (`celt_pitch_xcorr` + downsampler whitening,
