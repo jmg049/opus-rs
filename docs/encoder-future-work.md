@@ -49,8 +49,17 @@ hybrid → ~69; else CELT → 120), or flush the encoder delay explicitly. Note
 our decoder's measured hybrid delay (120) differs from libopus's (~69) - worth
 confirming our decoder's hybrid delay is conformant.
 
+## DTX (`OpusEncoder::set_dtx`)
+
+Implemented: after 200 ms of inactivity `encode_auto` emits a 1-byte TOC-only
+packet (the decoder conceals it), with the libopus run bounds (≤ 400 ms, then
+a refresh frame). Caveat: activity is decided by a **simple energy threshold**
+(`frame_is_active`, ≈ -60 dBFS) rather than libopus's VAD/analysis activity
+probability - it catches genuine silence and very quiet gaps but not noisy
+speech pauses. Using the SILK VAD's `speech_activity_q8` (currently buried in
+`encode_frame`) would make DTX trigger on real low-activity content too.
+
 ## Other
 
-- **DTX / silence frames** are not implemented (every frame is coded active).
 - The CELT-only path fills `max_bytes` (CBR) or shrinks to the VBR target;
   there is no constrained-VBR mode.

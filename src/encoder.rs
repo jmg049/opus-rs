@@ -81,6 +81,19 @@ fn compute_silk_rate_for_hybrid(rate: i32, swb: bool, channels: i32) -> i32 {
     silk_rate * channels.max(1)
 }
 
+/// Whether an interleaved frame carries activity (vs. silence), for the DTX
+/// decision: true when the mean square exceeds a near-silence threshold
+/// (≈ -60 dBFS). A simpler energy heuristic than libopus's VAD-based activity
+/// probability - it catches genuine silence and very quiet gaps.
+fn frame_is_active(pcm: &[f32]) -> bool {
+    const SILENCE_MS: f64 = 1e-6; // mean square ≈ (-60 dBFS)²
+    if pcm.is_empty() {
+        return false;
+    }
+    let ms = pcm.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / pcm.len() as f64;
+    ms > SILENCE_MS
+}
+
 /// A pure-Rust Opus encoder at 48 kHz, producing CELT, SILK (mono/stereo) and
 /// hybrid packets; [`encode_auto`](Self::encode_auto) chooses the mode.
 ///
@@ -122,6 +135,14 @@ pub struct OpusEncoder {
     /// Per-channel DC-reject high-pass filter state (`hp_mem`), carried across
     /// frames so the 3 Hz high-pass is continuous.
     hp_mem: [f32; 2],
+    /// Discontinuous transmission (`OPUS_SET_DTX`): emit a TOC-only packet for
+    /// inactive frames after a run of silence.
+    use_dtx: bool,
+    /// Consecutive milliseconds without activity, in Q1 (`nb_no_activity_ms_Q1`).
+    dtx_no_activity_q1: i32,
+    /// TOC byte of the last coded packet, reused for DTX packets so they carry
+    /// the stream's current mode/frame-size/channels.
+    last_toc: u8,
 }
 
 impl OpusEncoder {
@@ -142,7 +163,40 @@ impl OpusEncoder {
             target_bitrate: None,
             last_final_range: 0,
             hp_mem: [0.0; 2],
+            use_dtx: false,
+            dtx_no_activity_q1: 0,
+            last_toc: 0,
         }
+    }
+
+    /// Enables or disables discontinuous transmission (`OPUS_SET_DTX`). With
+    /// DTX on, once the input has been inactive (near-silent) for 200 ms the
+    /// encoder emits a 1-byte TOC-only packet for each further inactive frame
+    /// (up to 400 ms, then one refresh frame), which the decoder conceals as
+    /// comfort noise - dropping the silence bitrate to ~0.4 kb/s.
+    pub const fn set_dtx(&mut self, on: bool) {
+        self.use_dtx = on;
+    }
+
+    /// Decides whether to send a DTX (TOC-only) packet for a frame with the
+    /// given activity, advancing the no-activity run (`decide_dtx_mode`).
+    /// `frame_ms_q1` is twice the frame length in ms.
+    fn decide_dtx(&mut self, active: bool, frame_ms_q1: i32) -> bool {
+        const BEFORE_DTX_Q1: i32 = 10 * 20 * 2; // NB_SPEECH_FRAMES_BEFORE_DTX, 200 ms
+        const MAX_DTX_Q1: i32 = (10 + 20) * 20 * 2; // + MAX_CONSECUTIVE_DTX, 600 ms
+        if active {
+            self.dtx_no_activity_q1 = 0;
+            return false;
+        }
+        self.dtx_no_activity_q1 += frame_ms_q1;
+        if self.dtx_no_activity_q1 > BEFORE_DTX_Q1 {
+            if self.dtx_no_activity_q1 <= MAX_DTX_Q1 {
+                return true;
+            }
+            // Cap the run: send one refresh frame, then resume DTX.
+            self.dtx_no_activity_q1 = BEFORE_DTX_Q1;
+        }
+        false
     }
 
     /// libopus `dc_reject`: a 3 Hz one-pole high-pass on the interleaved
@@ -202,7 +256,24 @@ impl OpusEncoder {
             return Err(EncodeError::InvalidFrameSize);
         }
         let per_ch = pcm.len() / self.channels;
-        match per_ch {
+
+        // DTX: for 10 ms+ frames, once the input has been inactive long enough,
+        // send a 1-byte TOC-only packet (the decoder conceals it). Decided once
+        // per call so the no-activity run advances correctly.
+        if self.use_dtx {
+            if per_ch >= 480 {
+                let active = frame_is_active(pcm);
+                let frame_ms_q1 = (per_ch as i32 * 2 * 1000) / 48_000;
+                if self.decide_dtx(active, frame_ms_q1) && self.last_toc != 0 {
+                    self.last_final_range = 0;
+                    return Ok(alloc::vec![self.last_toc]);
+                }
+            } else {
+                self.dtx_no_activity_q1 = 0; // short CELT frames break the run
+            }
+        }
+
+        let packet = match per_ch {
             120 | 240 => self.encode(pcm, max_bytes),        // 2.5/5 ms: CELT only
             1920 | 2880 => self.encode_silk(pcm, max_bytes), // 40/60 ms: SILK only
             480 | 960 => {
@@ -225,8 +296,12 @@ impl OpusEncoder {
                     self.encode(pcm, max_bytes)
                 }
             },
-            _ => Err(EncodeError::InvalidFrameSize),
+            _ => return Err(EncodeError::InvalidFrameSize),
+        }?;
+        if let Some(&toc) = packet.first() {
+            self.last_toc = toc;
         }
+        Ok(packet)
     }
 
     /// The range state after the last encoded packet (`OPUS_GET_FINAL_RANGE`).
@@ -580,6 +655,60 @@ mod tests {
     use super::*;
     use crate::{OpusDecoder, decode_ogg_opus};
     use alloc::vec::Vec;
+
+    /// With DTX enabled, a stretch of silence after speech produces 1-byte
+    /// TOC-only packets (after the 200 ms activity hangover), the decoder
+    /// conceals them into finite output of the right length, and the same
+    /// silence costs far fewer bytes than with DTX off.
+    #[test]
+    fn dtx_collapses_the_silence_bitrate() {
+        // (use_dtx) -> (total silence bytes, DTX-packet count)
+        let run = |use_dtx: bool| {
+            let mut enc = OpusEncoder::new(1);
+            enc.set_bandwidth(Bandwidth::WideBand);
+            enc.set_bitrate(Some(16_000));
+            enc.set_dtx(use_dtx);
+            let mut dec = OpusDecoder::new(1);
+            let (mut silence_bytes, mut dtx_packets) = (0usize, 0usize);
+            for f in 0..100 {
+                let active = f < 5;
+                let pcm: Vec<f32> = (0..960)
+                    .map(|i| {
+                        if active {
+                            let t = (f * 960 + i) as f32 / 48_000.0;
+                            0.3 * (2.0 * core::f32::consts::PI * 300.0 * t).sin()
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let packet = enc.encode_auto(&pcm, 1275).expect("encode");
+                if !active {
+                    silence_bytes += packet.len();
+                }
+                if packet.len() == 1 {
+                    dtx_packets += 1;
+                }
+                let out = dec.decode_packet(&packet).expect("decode");
+                assert_eq!(out.len(), 960);
+                assert!(out.iter().all(|v| v.is_finite()), "non-finite output");
+            }
+            (silence_bytes, dtx_packets)
+        };
+
+        let (dtx_silence, dtx_packets) = run(true);
+        let (plain_silence, plain_packets) = run(false);
+
+        assert_eq!(plain_packets, 0, "DTX off must never emit TOC-only packets");
+        assert!(
+            dtx_packets >= 15,
+            "expected DTX packets during silence, got {dtx_packets}"
+        );
+        assert!(
+            dtx_silence * 2 < plain_silence,
+            "DTX silence {dtx_silence} B should be well under half of plain {plain_silence} B"
+        );
+    }
 
     /// `encode_ogg_opus` produces a valid Ogg Opus file that `decode_ogg_opus`
     /// reads back: the header round-trips, the decoded length matches the input
