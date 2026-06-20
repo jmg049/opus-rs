@@ -103,20 +103,28 @@ libopus's default (what callers usually get):
 
 | Mode | `opus_native` | libopus c0 | libopus c10 (default) |
 |------|---------------|------------|-----------------------|
-| SILK wideband 16 kb/s | **490×** | 725× | 210× |
-| hybrid fullband 32 kb/s | **290×** | 540× | 190× |
-| CELT fullband 64 kb/s | **593×** | 1015× | 410× |
+| SILK wideband 16 kb/s | **573×** | 738× | 220× |
+| hybrid fullband 32 kb/s | **347×** | 554× | 190× |
+| CELT fullband 64 kb/s | **659×** | 1087× | 432× |
 
-`opus_native` now encodes **faster than libopus at its default complexity on
-every mode** (1.4-2.3×), and reaches 0.55-0.68× of libopus's matched
-complexity-0 speed - up from ~0.3-0.5× - after SIMD (AVX2+FMA / SSE2) of the
-encoder's correlation hot loops: the CELT PVQ pulse search, the CELT pre-filter
-pitch analysis (`celt_pitch_xcorr`, two-thirds of CELT encode), and the SILK
-pitch analysis (cross-/autocorrelation and LPC whitening, half of SILK encode).
-The remaining gap to complexity-0 is the serial recurrences (pre-emphasis, the
-transient detector's filters, the SILK noise-shaping quantiser), which the
-reference also runs scalar. Every mode encodes and decodes
-at hundreds of × realtime.
+`opus_native` encodes **faster than libopus at its default complexity on every
+mode** (1.5-2.6×), and reaches 0.61-0.78× of libopus's matched complexity-0
+speed - up from ~0.3-0.5× - after SIMD (AVX2+FMA / SSE2) of the encoder's hot
+loops:
+
+- **CELT**: the PVQ pulse search; the pre-filter pitch analysis
+  (`celt_pitch_xcorr` + downsampler whitening, two-thirds of CELT encode);
+  reused per-frame scratch buffers (the allocator zeroing was ~9%).
+- **SILK**: the pitch analysis (cross-/autocorrelation, LPC whitening) and Burg
+  LPC; the front-end 48→16 kHz resampler, reworked from a scalar fixed-point
+  FIR to a float SIMD decimator (it was the second-largest SILK cost); and the
+  NSQ prediction filters, with a bit-exact fixed-point SIMD dot so the bitstream
+  is unchanged.
+
+The remaining gap to complexity-0 is the serial recurrences - pre-emphasis, the
+transient detector's IIR filters, the NSQ rate-distortion loop, the NLSF
+delayed-decision VQ - which the reference also runs scalar. Every mode encodes
+and decodes at hundreds of × realtime.
 
 ## Conformance
 
