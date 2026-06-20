@@ -2380,6 +2380,16 @@
     <bcf:citekey order="4" intorder="2">cover2006elements</bcf:citekey>
     <bcf:citekey order="5" intorder="1">martin1979range</bcf:citekey>
     <bcf:citekey order="5" intorder="2">witten1987arithmetic</bcf:citekey>
+    <bcf:citekey order="6" intorder="1">princen1986analysis</bcf:citekey>
+    <bcf:citekey order="6" intorder="2">princen1987subband</bcf:citekey>
+    <bcf:citekey order="7" intorder="1">zwicker1999psychoacoustics</bcf:citekey>
+    <bcf:citekey order="8" intorder="1">fischer1986pyramid</bcf:citekey>
+    <bcf:citekey order="9" intorder="1">makhoul1975linear</bcf:citekey>
+    <bcf:citekey order="9" intorder="2">rabiner1978digital</bcf:citekey>
+    <bcf:citekey order="10" intorder="1">levinson1947wiener</bcf:citekey>
+    <bcf:citekey order="11" intorder="1">burg1975maximum</bcf:citekey>
+    <bcf:citekey order="12" intorder="1">itakura1975line</bcf:citekey>
+    <bcf:citekey order="13" intorder="1">laroia1991robust</bcf:citekey>
   </bcf:section>
   <!-- SORTING TEMPLATES -->
   <bcf:sortingtemplate name="nyt">

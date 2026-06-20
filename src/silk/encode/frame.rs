@@ -78,6 +78,19 @@ pub(crate) struct SilkChannelEncoder {
     /// per libopus's table (the rest of the analysis is already its low-
     /// complexity configuration: plain NSQ, no warping).
     pub complexity: u8,
+    /// Per-frame work buffers, reused across frames to avoid reallocating (and
+    /// re-zeroing) them every call: pitch-analysis input/residual, the aligned
+    /// residual, the noise-shape input, the LPC-analysis input, and the pulse
+    /// output. Fully overwritten each frame.
+    scratch_pitch: Vec<f32>,
+    scratch_res: Vec<f32>,
+    scratch_res_f: Vec<f32>,
+    scratch_x_buf: Vec<f32>,
+    scratch_lpc_in: Vec<f32>,
+    scratch_pulses: Vec<i8>,
+    /// Reused rate-control snapshot (NSQ state + entropy history), so the
+    /// gain-bisection fallback does not clone the NSQ `Vec`s every frame.
+    snap_nsq: NsqState,
 }
 
 impl SilkChannelEncoder {
@@ -100,6 +113,13 @@ impl SilkChannelEncoder {
             fs_khz,
             nb_subfr,
             complexity: 10,
+            scratch_pitch: Vec::new(),
+            scratch_res: Vec::new(),
+            scratch_res_f: Vec::new(),
+            scratch_x_buf: Vec::new(),
+            scratch_lpc_in: Vec::new(),
+            scratch_pulses: Vec::new(),
+            snap_nsq: NsqState::new(),
         }
     }
 
@@ -172,14 +192,24 @@ impl SilkChannelEncoder {
         };
         let pe_order = pe_lpc_order.min(order);
         let buf_len = la_pitch + frame_length + ltp_mem_length;
-        let mut pitch_x_buf = vec![0.0f32; buf_len];
-        for (i, &v) in self.prev_input.iter().enumerate() {
-            pitch_x_buf[i] = f32::from(v);
+        // Reuse the work buffers (no per-frame allocation). `pitch_x_buf` is
+        // history + frame, with the trailing `la_pitch` lookahead zeroed; the
+        // zipped writes carry no bounds checks.
+        let mut pitch_x_buf = core::mem::take(&mut self.scratch_pitch);
+        pitch_x_buf.resize(buf_len, 0.0);
+        for (dst, &v) in pitch_x_buf[..ltp_mem_length].iter_mut().zip(self.prev_input.iter()) {
+            *dst = f32::from(v);
         }
-        for (i, &v) in input.iter().enumerate() {
-            pitch_x_buf[ltp_mem_length + i] = f32::from(v);
+        for (dst, &v) in pitch_x_buf[ltp_mem_length..ltp_mem_length + frame_length]
+            .iter_mut()
+            .zip(input.iter())
+        {
+            *dst = f32::from(v);
         }
-        let mut res = vec![0.0f32; buf_len];
+        pitch_x_buf[ltp_mem_length + frame_length..].fill(0.0);
+        let mut res = core::mem::take(&mut self.scratch_res);
+        res.clear();
+        res.resize(buf_len, 0.0);
         let _pl_g = crate::prof::scope("silk:find_pitch_lags");
         let pl = find_pitch_lags(
             &pitch_x_buf,
@@ -200,7 +230,9 @@ impl SilkChannelEncoder {
         let signal_type = if is_voiced { TYPE_VOICED } else { TYPE_UNVOICED };
         let pitch_l = pl.pitch_l;
         // The whitened residual aligned to the frame (`res_pitch_frame`).
-        let res_f: Vec<f32> = res[ltp_mem_length..ltp_mem_length + frame_length].to_vec();
+        let mut res_f = core::mem::take(&mut self.scratch_res_f);
+        res_f.clear();
+        res_f.extend_from_slice(&res[ltp_mem_length..ltp_mem_length + frame_length]);
 
         // Noise-shaping analysis (complexity-0 configuration: no warping, so
         // the plain NSQ sees ordinary shaping coefficients). The reference runs
@@ -209,9 +241,11 @@ impl SilkChannelEncoder {
         let la_shape = 3 * self.fs_khz as usize;
         let shaping_lpc_order = 12.min(order);
         let snr_db_q7 = control_snr(self.fs_khz, self.nb_subfr, self.target_rate_bps);
-        let mut x_buf = vec![0.0f32; frame_length + 2 * la_shape];
-        for (i, &v) in input.iter().enumerate() {
-            x_buf[la_shape + i] = f32::from(v);
+        let mut x_buf = core::mem::take(&mut self.scratch_x_buf);
+        x_buf.clear();
+        x_buf.resize(frame_length + 2 * la_shape, 0.0);
+        for (dst, &v) in x_buf[la_shape..la_shape + frame_length].iter_mut().zip(input.iter()) {
+            *dst = f32::from(v);
         }
         let shape_cfg = NoiseShapeConfig {
             fs_khz: self.fs_khz,
@@ -246,7 +280,9 @@ impl SilkChannelEncoder {
         }
         let pre = order; // preceding samples per subframe (predictLPCOrder)
         let shift = subfr_length + pre;
-        let mut lpc_in_pre = vec![0.0f32; self.nb_subfr * shift];
+        let mut lpc_in_pre = core::mem::take(&mut self.scratch_lpc_in);
+        lpc_in_pre.clear();
+        lpc_in_pre.resize(self.nb_subfr * shift, 0.0);
 
         let mut ltp_coef = [0i16; LTP_ORDER * MAX_NB_SUBFR];
         let mut ltp_index = [0i8; MAX_NB_SUBFR];
@@ -443,10 +479,18 @@ impl SilkChannelEncoder {
         // CELT, which codes it far better than extreme-gain SILK. The reference's
         // zero-pulse damage control (which would desync our decoder without a
         // synthesis resync) is the one remaining refinement.
-        let mut pulses = vec![0i8; frame_length];
+        let mut pulses = core::mem::take(&mut self.scratch_pulses);
+        pulses.clear();
+        pulses.resize(frame_length, 0);
         let mut gains_q16 = gres.gains_q16;
         let mut gains_indices = gres.gains_indices;
-        let snap = max_bits.map(|_| (enc.clone(), self.nsq.clone(), self.ec_prev));
+        // Snapshot for the gain-bisection fallback. The bulky NSQ state is
+        // copied into the reused `snap_nsq` (no per-frame allocation); only the
+        // small range-coder state is cloned.
+        let snap_enc = max_bits.map(|_| {
+            self.snap_nsq.clone_from(&self.nsq);
+            (enc.clone(), self.ec_prev)
+        });
         let bits_margin = max_bits.map_or(0, |m| m / 4); // VBR: within 25% is close enough
         let mut best_fit: Option<(RangeEncoder, NsqState, EcPrevState, i8, [i8; MAX_NB_SUBFR])> = None;
         let mut gain_mult_q8 = 256i32;
@@ -460,9 +504,9 @@ impl SilkChannelEncoder {
         loop {
             if iter > 0 {
                 // Restore and re-quantise the gains scaled by the multiplier.
-                let (enc0, nsq0, ec0) = snap.as_ref().expect("snapshot present when capping");
+                let (enc0, ec0) = snap_enc.as_ref().expect("snapshot present when capping");
                 enc.clone_from(enc0);
-                self.nsq.clone_from(nsq0);
+                self.nsq.clone_from(&self.snap_nsq);
                 self.ec_prev = *ec0;
                 self.last_gain_index = last_gain_prev;
                 let mut pg = [0i32; MAX_NB_SUBFR];
@@ -603,6 +647,14 @@ impl SilkChannelEncoder {
                 indices.gains_indices = *gi0;
             }
         }
+
+        // Return the work buffers for the next frame to reuse.
+        self.scratch_pitch = pitch_x_buf;
+        self.scratch_res = res;
+        self.scratch_res_f = res_f;
+        self.scratch_x_buf = x_buf;
+        self.scratch_lpc_in = lpc_in_pre;
+        self.scratch_pulses = pulses;
         indices
     }
 }

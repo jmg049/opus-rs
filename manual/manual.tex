@@ -146,8 +146,10 @@ per frame.
   the vocal tract) that is well modeled as a slowly varying \emph{linear
   filter} driven by a sparse \emph{excitation}. Coding speech efficiently means
   coding that model: estimate the filter, estimate the pitch, and transmit only
-  the residual that the model fails to predict. This is \termdef{linear-predictive
-  coding} (LPC), and it is the approach SILK takes, in the \emph{time domain}, at
+  the residual that the model fails to predict. This is
+  \termdef{linear-predictive
+  coding} (LPC), and it is the approach SILK takes, in the \emph{time
+  domain}, at
   internal rates of 8, 12, or 16~kHz.
 
   \textbf{Music} is arbitrary: dense, polyphonic, and percussive, with energy
@@ -203,8 +205,10 @@ resampling, and the cross-frame state used to handle mode transitions.
     \textbf{Layer} & \textbf{Specification} & \textbf{Responsibility} \\
     \midrule
     \code{ogg}         & RFC 3533 / 7845 & file container, pages, timing \\
-    \code{multistream} & RFC 7845 \S5.1.1 & surround: $N$ coupled/mono streams \\
-    \code{decoder}/\code{encoder} & RFC 6716 \S4/\S5 & mode dispatch, transitions, PLC/FEC/DTX \\
+    \code{multistream} & RFC 7845 \S5.1.1 & surround: $N$
+    coupled/mono streams \\
+    \code{decoder}/\code{encoder} & RFC 6716 \S4/\S5 & mode dispatch,
+    transitions, PLC/FEC/DTX \\
     \code{silk}        & RFC 6716 \S4.2 & linear-predictive speech coder \\
     \code{celt}        & RFC 6716 \S4.3 & MDCT transform coder \\
     \code{packet}      & RFC 6716 \S3 & TOC byte, frame packing \\
@@ -336,7 +340,7 @@ lie in.
   \begin{equation}\label{eq:rc_subdivide}
     [\,\ell, \ell + r\,) \;\longmapsto\;
     \left[\,\ell + r\tfrac{\mathit{fl}}{\mathit{ft}},\;
-            \ell + r\tfrac{\mathit{fh}}{\mathit{ft}}\,\right).
+    \ell + r\tfrac{\mathit{fh}}{\mathit{ft}}\,\right).
   \end{equation}
   The interval shrinks by a factor of $(\mathit{fh}-\mathit{fl})/\mathit{ft} =
   p(s)$ at each step, so after the whole message its width is $\prod_i p(s_i) =
@@ -408,7 +412,8 @@ pub fn update(&mut self, fl: u32, fh: u32, ft: u32) {
 
 Two details are easy to miss and important to get right. First, the first symbol
 ($\mathit{fl}=0$) is given the \emph{remainder} of the range
-($\mathit{rng} - s\,(\mathit{ft}-\mathit{fh})$), not $s\cdot\mathit{fh}$; this is
+($\mathit{rng} - s\,(\mathit{ft}-\mathit{fh})$), not
+$s\cdot\mathit{fh}$; this is
 how the coder accounts for the truncation in $s = \floor*{\mathit{rng}/
 \mathit{ft}}$ and stays reversible. Second, \code{decode} caps its result at
 $\mathit{ft}$ via \code{.min(ft)} to defend against a corrupt stream pushing the
@@ -491,7 +496,8 @@ fn carry_out(&mut self, c: u32) {
 \begin{concept}{Why a 0xFF Run Must Be Held}
   A carry into a \code{0xFF} byte turns it into \code{0x00} and \emph{propagates
   further left}. A carry into any other byte simply increments it and stops. So
-  the encoder can safely emit a non-\code{0xFF} byte only once it knows whether a
+  the encoder can safely emit a non-\code{0xFF} byte only once it
+  knows whether a
   carry is coming, which it learns from the \emph{next} byte. It therefore
   keeps one pending byte in \code{rem} and counts a run of \code{0xFF}s in
   \code{ext}. When a non-\code{0xFF} byte arrives with carry $c$: the pending
@@ -643,8 +649,10 @@ pub(crate) fn tell_frac(nbits_total: u32, rng: u32) -> u32 {
   \code{rng} still spans $\log_2(\mathit{rng})$ bits of undecided value. So the
   bits actually consumed are \code{nbits\_total} $- \log_2(\mathit{rng})$.
   \code{tell()} uses the integer $\floor*{\log_2}$ (a conservative whole-bit
-  count); \code{tell\_frac()} refines $\log_2(\mathit{rng})$ to 3 fractional bits
-  by the Newton-style squaring loop above, giving the $1/8$-bit resolution Opus's
+  count); \code{tell\_frac()} refines $\log_2(\mathit{rng})$ to 3
+  fractional bits
+  by the Newton-style squaring loop above, giving the $1/8$-bit
+  resolution Opus's
   allocator works in. The two readouts agree on encoder and decoder because they
   are computed from the same $(\mathit{nbits\_total}, \mathit{rng})$.
 \end{concept}
@@ -658,7 +666,8 @@ implementation, described below.
   After encoding (or decoding) the same sequence of symbols, the encoder and
   decoder must hold \emph{identical} \code{rng} values, and, transitively,
   identical \code{val} and identical output bytes. RFC 6716 elevates this to a
-  conformance tool: \code{OPUS\_GET\_FINAL\_RANGE} returns the coder's \code{rng}
+  conformance tool: \code{OPUS\_GET\_FINAL\_RANGE} returns the
+  coder's \code{rng}
   at the end of each packet, and a correct decoder's final range must equal the
   reference encoder's, \emph{exactly}, for every packet.
 
@@ -673,6 +682,1253 @@ implementation, described below.
 
 In hybrid and redundancy cases (\cref{sec:opus_layer}) the packet carries more
 than one range-coded segment; the implementation XORs their final ranges
-together to form the single reported value, matching the reference's bookkeeping.
+together to form the single reported value, matching the reference's
+bookkeeping.
+
+\section{Packet Framing}\label{sec:packet}
+
+The range coder produces the bytes of a single frame. The packet layer
+(\S3) is the envelope around those bytes: it names how to interpret the frame,
+allows several frames to share one packet, and defines the rules a decoder uses
+to reject malformed input. It contains no audio math and no entropy coding, only
+parsing.
+
+\subsection{The Self-Delimiting Question}\label{subsec:self_delimit}
+
+A design decision shapes the entire packet format: an Opus packet is \emph{not}
+self-delimiting. It does not record its own length. Opus assumes a transport
+layer (Ogg, RTP, WebRTC, Matroska) that already knows where each packet ends,
+and declines to duplicate that information.
+
+\begin{concept}{Why Packets Carry No Length Field}
+  Storing a length in every packet would waste two or three bytes on data the
+  transport already has. At the low bitrates Opus targets, a 20~ms packet can be
+  under 20 bytes, so a redundant length prefix is a 10--15\% overhead. Opus
+  instead infers frame boundaries from the total packet size supplied by the
+  container. The cost is that the codec cannot be handed a bare byte stream and
+  asked to find packet boundaries; it must be told, per packet, how many bytes
+  belong to it. The one exception is the \termdef{self-delimiting} framing used
+  inside multistream packets (\cref{sec:multistream}), where several Opus packets
+  are concatenated and all but the last must announce their own length.
+\end{concept}
+
+\subsection{The TOC Byte}\label{subsec:toc}
+
+Every packet begins with one \termdef{Table of Contents} (TOC) byte. It packs
+three fields that, together, determine everything the decoder needs to dispatch
+the packet:
+
+\begin{equation}\label{eq:toc_layout}
+  \underbrace{\texttt{c c c c c}}_{\text{config (5)}}\;
+  \underbrace{\texttt{s}}_{\text{stereo (1)}}\;
+  \underbrace{\texttt{n n}}_{\text{count code (2)}}
+\end{equation}
+
+The top five bits select one of 32 \termdef{configurations}; the next bit is the
+mono/stereo flag; the low two bits are the frame-packing code
+(\cref{subsec:framecodes}). The implementation treats the TOC as a transparent
+wrapper over the byte, with each field a small accessor:
+
+\begin{lstlisting}[language=Rust]
+pub struct Toc(u8);
+
+impl Toc {
+    pub const fn config(self) -> u8 { self.0 >> 3 }            // bits 7..3
+    pub const fn stereo(self) -> bool { (self.0 >> 2) & 1 == 1 } // bit 2
+    pub const fn channels(self) -> u8 { 1 + ((self.0 >> 2) & 1) }
+    pub const fn frame_count_code(self) -> u8 { self.0 & 0x3 } // bits 1..0
+    pub const fn mode(self) -> Mode { /* from config */ }
+    pub const fn bandwidth(self) -> Bandwidth { /* from config */ }
+    pub const fn frame_size(self) -> FrameSize { /* from config */ }
+}
+\end{lstlisting}
+
+\subsubsection{The 32 configurations}
+
+The configuration number is not an arbitrary index; it is a structured encoding
+of (mode, bandwidth, frame size). The 32 values partition into the three modes,
+and within each mode the bandwidths and frame sizes are laid out in contiguous
+runs (\cref{tab:configs}). This regularity lets the encoder compute a config as
+a base value plus a frame-size offset, which is exactly how the encoder builds
+its TOC (\cref{sec:opus_layer}).
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{llll}
+    \toprule
+    \textbf{Config} & \textbf{Mode} & \textbf{Bandwidth} & \textbf{Frame sizes (ms)} \\
+    \midrule
+    0--3   & SILK-only & narrowband (NB)      & 10, 20, 40, 60 \\
+    4--7   & SILK-only & mediumband (MB)      & 10, 20, 40, 60 \\
+    8--11  & SILK-only & wideband (WB)        & 10, 20, 40, 60 \\
+    12--13 & Hybrid    & super-wideband (SWB) & 10, 20 \\
+    14--15 & Hybrid    & fullband (FB)        & 10, 20 \\
+    16--19 & CELT-only & narrowband (NB)      & 2.5, 5, 10, 20 \\
+    20--23 & CELT-only & wideband (WB)        & 2.5, 5, 10, 20 \\
+    24--27 & CELT-only & super-wideband (SWB) & 2.5, 5, 10, 20 \\
+    28--31 & CELT-only & fullband (FB)        & 2.5, 5, 10, 20 \\
+    \bottomrule
+  \end{tabular}
+  \caption{The 32 TOC configurations (\S3.1, Table 2). The mode dictates which
+  coder runs; the bandwidth caps the highest coded frequency; the frame size is
+  always expressed at the 48~kHz reference.}
+  \label{tab:configs}
+\end{table}
+
+Three properties of \cref{tab:configs} are worth noting. SILK-only modes support
+the long 40 and 60~ms frames that suit speech but never the short 2.5 and 5~ms
+frames; CELT-only modes are the reverse, supporting short low-delay frames down
+to 2.5~ms. Hybrid mode exists only at the two highest bandwidths, because it is
+defined as ``SILK wideband plus a CELT extension''; below super-wideband there
+is no high band for CELT to add. And mediumband appears only for SILK, as CELT's
+band layout has no 6~kHz cutoff.
+
+\subsection{Frame-Packing Codes}\label{subsec:framecodes}
+
+The two low bits of the TOC select one of four ways to pack frames into the
+remaining bytes. The motivation is amortization: a single packet can carry up to
+120~ms of audio (for example three 40~ms frames), spreading the one-byte TOC
+overhead across multiple frames and reducing per-frame container overhead.
+
+\begin{concept}{The Four Frame-Packing Codes}
+  Let the bytes after the TOC be the \emph{payload}. The count code determines
+  how the payload splits into frames:
+  \begin{itemize}[itemsep=3pt]
+    \item \textbf{Code 0:} one frame, occupying the entire payload.
+    \item \textbf{Code 1:} two frames of \emph{equal} size; the payload length
+      must be even, and each frame is half.
+    \item \textbf{Code 2:} two frames of possibly \emph{unequal} size; an
+      explicit length precedes the first frame, and the second takes the rest.
+    \item \textbf{Code 3:} an arbitrary count $M$ of frames (1--48), with a
+      following byte that selects constant-bitrate (CBR, all frames equal) or
+      variable-bitrate (VBR, explicit lengths) packing, and optional padding.
+  \end{itemize}
+\end{concept}
+
+Frame lengths, where coded explicitly (code 2 and VBR code 3), use a one- or
+two-byte representation: a byte below 252 is the length itself; a byte of 252 to
+255 is combined with a following byte as $\text{second} \times 4 +
+\text{first}$, reaching up to 1275, the maximum frame size. A coded length of
+zero is legal and denotes a dropped or DTX (discontinuous transmission) frame
+that the decoder conceals.
+
+The parser is a direct transcription of these four cases:
+
+\begin{lstlisting}[language=Rust]
+match toc.frame_count_code() {
+    0 => { check_frame_len(rest.len())?; frames.push(rest); }
+    1 => {
+        if rest.len() % 2 != 0 { return Err(PacketError::Code1UnevenPayload); }
+        let (a, b) = rest.split_at(rest.len() / 2);
+        frames.push(a); frames.push(b);
+    }
+    2 => {
+        let n1 = read_frame_len(&mut rest)?;     // explicit first length
+        let frame1 = take(&mut rest, n1)?;
+        frames.push(frame1); frames.push(rest);  // second takes the remainder
+    }
+    _ => { /* code 3: count byte, optional padding, CBR or VBR lengths */ }
+}
+\end{lstlisting}
+
+\subsubsection{Code 3 in detail}
+
+Code 3 carries a second header byte after the TOC: bit 7 is the VBR flag, bit 6
+signals the presence of padding, and the low six bits give the frame count $M$.
+Padding, when present, is a length encoded as a run of bytes (a value of 255
+means ``254 bytes of padding, continue reading''), allowing a packet to be
+inflated to a target size for constant-rate transport without affecting the
+audio. In VBR packing the header is followed by $M-1$ explicit frame lengths,
+with the final frame taking the remainder; in CBR packing all $M$ frames share
+the payload equally, and a payload not divisible by $M$ is an error.
+
+\subsection{Validity Rules}\label{subsec:validity}
+
+RFC 6716 \S3.4 enumerates seven conditions, labeled [R1] through [R7], that a
+well-formed packet must satisfy. They exist because a decoder fed hostile or
+corrupt input must reject it cleanly rather than read out of bounds or allocate
+unboundedly. The implementation maps each rule to a typed error
+(\cref{tab:rules}).
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lll}
+    \toprule
+    \textbf{Rule} & \textbf{Condition} & \textbf{Error} \\
+    \midrule
+    R1 & packet is at least one byte (has a TOC)       & \code{Empty} \\
+    R2 & every frame is at most 1275 bytes             & \code{FrameTooLarge} \\
+    R3 & code 1 payload length is even                 & \code{Code1UnevenPayload} \\
+    R4 & coded frame lengths are not truncated         & \code{InvalidFrameLength} \\
+    R5 & code 3 count $M\ge 1$ and total $\le$ 120~ms  & \code{InvalidFrameCount} \\
+    R6 & padding does not exceed the payload           & \code{InvalidPadding} \\
+    R7 & frame lengths do not overrun the payload      & \code{InvalidFrameLength} \\
+    \bottomrule
+  \end{tabular}
+  \caption{The malformed-packet rules [R1]--[R7] (\S3.4) and their errors.}
+  \label{tab:rules}
+\end{table}
+
+\begin{importantnote}
+  Rules R5 and R6 are the codec's defense against denial-of-service input. R5
+  caps a packet at 120~ms of audio, so a single packet cannot demand an
+  unbounded decode; the implementation checks $M \times \text{(tenths of ms per
+  frame)} \le 1200$. R6 ensures the padding count, which is attacker-controlled,
+  cannot point past the end of the buffer. Differential fuzzing against the
+  reference (over a million iterations) found two arithmetic-underflow bugs in
+  earlier versions of the surrounding code, both since fixed by matching the
+  reference's signed semantics; the packet rules are the first line that stops
+  such input from reaching the signal-processing layers at all.
+\end{importantnote}
+
+\section{CELT: Transform Coding}\label{sec:celt}
+
+CELT, the Constrained-Energy Lapped Transform (\S4.3), is the music half of
+Opus. It is a transform codec: it maps blocks of audio into the frequency domain
+with a Modified Discrete Cosine Transform, then spends bits on the resulting
+coefficients according to a psychoacoustic budget. Its distinguishing feature,
+the one its name advertises, is that it codes the \emph{energy} of each frequency
+band explicitly and separately from the band's \emph{shape}, which keeps the
+reconstructed spectrum's energy envelope faithful even when bits are scarce.
+
+This section follows the decoder's data flow: the transform
+(\cref{subsec:mdct}), the energy envelope (\cref{subsec:celt_energy}), the
+pyramid vector quantizer that codes band shapes (\cref{subsec:pvq}), the
+combinatorial enumeration that turns a quantized shape into an index
+(\cref{subsec:cwrs}), the bit allocation that ties them together
+(\cref{subsec:celt_allocation}), the band-coding machinery
+(\cref{subsec:celt_bands}), and finally the encoder's analysis
+(\cref{subsec:celt_encoder}).
+
+\subsection{The MDCT and Lapped Transforms}\label{subsec:mdct}
+
+A transform codec cannot simply cut the signal into blocks and transform each
+independently: the discontinuities at block boundaries would produce audible
+clicks, and the rectangular truncation would smear energy across frequencies
+(spectral leakage). The standard remedy is to overlap consecutive blocks and
+window them, but naive overlap doubles the data rate. The Modified Discrete
+Cosine Transform~\cite{princen1986analysis,princen1987subband} resolves this
+tension: it overlaps blocks by 50\% yet remains \emph{critically sampled},
+producing exactly $N$ coefficients for every $N$ new input samples.
+
+\begin{concept}{The Modified Discrete Cosine Transform}
+  The MDCT maps $2N$ real input samples to $N$ real coefficients:
+  \begin{equation}\label{eq:mdct}
+    X[k] = \sum_{n=0}^{2N-1} x[n]\,
+      \cos\!\left[\frac{\pi}{N}\left(n + \tfrac{1}{2} + \tfrac{N}{2}\right)
+                  \left(k + \tfrac{1}{2}\right)\right],
+    \quad k = 0,\dots,N-1.
+  \end{equation}
+  The inverse (IMDCT) produces $2N$ samples from the $N$ coefficients. Because
+  the forward transform discards half its inputs' worth of degrees of freedom,
+  a single IMDCT cannot recover its input; the missing information is supplied by
+  the \emph{overlapping} neighbor block. Each output block overlaps its successor
+  by $N$ samples, and the two contributions are added. This is
+  \termdef{time-domain aliasing cancellation} (TDAC): the IMDCT of one block
+  contains a time-reversed alias of the input, and the overlapping block's alias
+  is equal and opposite, so the sum cancels it exactly.
+\end{concept}
+
+\subsubsection{The window and perfect reconstruction}
+
+TDAC cancels only if the analysis and synthesis windows satisfy the
+Princen-Bradley conditions. For a window $w[n]$ of length $2N$, perfect
+reconstruction requires
+\begin{align}
+  \label{eq:pr_symmetry}
+  w[2N - 1 - n] &= w[n] && \text{(symmetry), and}\\
+  \label{eq:pr_power}
+  w[n]^2 + w[n + N]^2 &= 1 && \text{(power complementarity).}
+\end{align}
+CELT uses the \termdef{Vorbis window}, a power-complementary window built from a
+sine of a sine:
+\begin{equation}\label{eq:vorbis_window}
+  w[n] = \sin\!\left[\frac{\pi}{2}\,
+    \sin^2\!\left(\frac{\pi}{2L}\left(n + \tfrac{1}{2}\right)\right)\right],
+  \quad n = 0,\dots,L-1,
+\end{equation}
+where $L$ is the overlap length. CELT does not window the full block: only the
+first and last $L$ samples are tapered (with $L = 120$ at 48~kHz), and the
+interior is passed through unwindowed. This \termdef{low-overlap} design trades a
+little frequency selectivity for substantially reduced algorithmic delay, which
+is what lets Opus reach 5~ms latency in CELT mode.
+
+\begin{implementation}{TDAC Reconstruction in the IMDCT}
+  The synthesis overlap-add is the kernel that makes the whole transform
+  invertible. After the IMDCT produces the time-domain block, the overlap region
+  is mixed with the tail held over from the previous frame, applying the window
+  to both edges so that \cref{eq:pr_power} cancels the aliasing:
+  \begin{lstlisting}[language=Rust]
+// Mirror both edges for TDAC, mixing with the previous frame's tail.
+for i in 0..overlap / 2 {
+    let (a, b) = (i, overlap - 1 - i);
+    let (x1, x2) = (out[b], out[a]);
+    let (w1, w2) = (window[i], window[overlap - 1 - i]);
+    out[a] = w2 * x2 - w1 * x1;
+    out[b] = w1 * x2 + w2 * x1;
+}
+  \end{lstlisting}
+  The round trip (forward MDCT then inverse with overlap-add) is verified by a
+  perfect-reconstruction test: a windowed block transformed and inverted returns
+  the input to floating-point precision, with zero delay and unit gain.
+\end{implementation}
+
+\subsubsection{Short blocks for transients}
+
+A long MDCT gives fine frequency resolution but coarse time resolution, which
+smears a sharp transient (a drum hit, a consonant) backward in time as
+\termdef{pre-echo}: quantization noise spread across the whole block becomes
+audible before the attack that produced it. CELT's defense is to switch, for
+transient frames, from one long MDCT to a series of $B$ short MDCTs (with $B =
+2, 4, 8$), each covering a fraction of the frame. The encoder signals this choice
+with a transient flag (\cref{subsec:celt_encoder}); the short transforms'
+coefficients are then interleaved so the band structure still applies. Time
+resolution improves by a factor of $B$ at the cost of frequency resolution,
+exactly the uncertainty trade-off, applied adaptively per frame.
+
+\subsubsection{Computing the MDCT through an FFT}
+
+Evaluated directly, \cref{eq:mdct} costs $O(N^2)$. In practice the MDCT
+factors into three stages: a complex \emph{pre-rotation} that folds the $2N$ real
+inputs into $N/4$ complex values, an $N/4$-point complex FFT, and a complex
+\emph{post-rotation} that unpacks the result. The FFT dominates the cost and is
+isolated behind a seam in the implementation: the default build routes it
+through an external planned-FFT backend, while a dependency-free build falls back
+to a direct $O(N^2)$ evaluation. The numerical and performance consequences of
+this seam are treated in \cref{sec:optimizations}; here it suffices that the
+transform is an $O(N\log N)$ operation in the production configuration.
+
+\subsection{The Energy Envelope}\label{subsec:celt_energy}
+
+CELT divides the MDCT spectrum into 21 \termdef{bands} whose widths follow the
+ear's critical bands: narrow at low frequencies where the ear resolves pitch
+finely, wide at high frequencies where it does not~\cite{zwicker1999psychoacoustics}.
+For each band, CELT codes two things separately: the band's \emph{energy} (the
+$L^2$ norm of its coefficients) and its \emph{shape} (the unit-norm direction).
+This separation is the ``Constrained-Energy'' in the codec's name.
+
+\begin{concept}{Why Code Energy Separately}
+  The audibility of a frequency band is governed largely by how much energy it
+  contains, not by the precise arrangement of coefficients within it. By coding
+  the energy envelope explicitly and protecting it with its own bits, CELT
+  guarantees that the reconstructed signal has the right spectral balance even
+  when the shape is coded coarsely. A codec that quantized raw coefficients would
+  instead let energy drift as bits run short, producing audible spectral tilt and
+  ``birdie'' artifacts. The cost of the guarantee is the overhead of the envelope
+  itself, which CELT minimizes with aggressive prediction.
+\end{concept}
+
+Energy is coded in the $\log_2$ domain in three passes of decreasing
+significance:
+
+\begin{enumerate}[itemsep=3pt]
+  \item \textbf{Coarse energy} quantizes each band's log-energy to roughly 6~dB
+    resolution, predicted from neighbors and coded with a Laplace model.
+  \item \textbf{Fine energy} refines each band with a number of raw bits set by
+    the allocation, halving the error per bit.
+  \item \textbf{Final bits} distribute any leftover budget, one bit at a time,
+    to the bands that the allocation flagged as highest priority.
+\end{enumerate}
+
+\subsubsection{Coarse energy and two-dimensional prediction}
+
+The coarse energy of a band is highly predictable from two neighbors: the same
+band in the previous frame (time prediction) and the adjacent band in the same
+frame (frequency prediction). CELT codes only the prediction residual, with a
+Laplace probability model whose width depends on the frame size. The update
+applies a prediction coefficient $\alpha$ in time and accumulates a running
+frequency prediction with a leakage factor $\beta$:
+\begin{equation}\label{eq:energy_pred}
+  E_i \leftarrow \alpha\, E_i^{\text{prev}} + p_i + q_i,
+  \qquad p_{i+1} = p_i + q_i(1 - \beta),
+\end{equation}
+where $q_i$ is the decoded residual for band $i$ and $p_i$ the frequency
+predictor carried across bands. Intra frames (no time prediction) set $\alpha=0$
+and use a larger $\beta$.
+
+\begin{lstlisting}[language=Rust]
+let (coef, beta) = if intra { (0.0, BETA_INTRA) }
+                   else     { (PRED_COEF[lm], BETA_COEF[lm]) };
+let mut prev = [0.0f32; 2];
+for i in start..end {
+    for (c, prev_c) in prev.iter_mut().enumerate().take(channels) {
+        let qi = if budget - tell >= 15 {
+            ec_laplace_decode(dec, /* model for band i, frame size lm */)
+        } else { /* budget-starved fallback code */ };
+        let old = state.old_ebands[c][i].max(-9.0);
+        state.old_ebands[c][i] = coef * old + *prev_c + qi as f32;
+        *prev_c += qi as f32 - beta * qi as f32;
+    }
+}
+\end{lstlisting}
+
+The Laplace coder (\S4.3.2.1) is a specialization of the range coder for a
+two-sided geometric distribution: small residuals near zero are cheap, large
+ones progressively more expensive, matching the statistics of inter-frame energy
+deltas. When the remaining budget falls below the threshold to afford a Laplace
+symbol, the coder drops to a fixed fallback code so the decode never stalls.
+
+\subsection{Pyramid Vector Quantization}\label{subsec:pvq}
+
+Once a band's energy is known, its shape is a unit vector in $N$ dimensions (for
+a band of $N$ coefficients). CELT quantizes that direction with \termdef{pyramid
+vector quantization} (PVQ)~\cite{fischer1986pyramid}, a structured vector
+quantizer with a property that makes it ideal here: every codeword has exactly
+the same norm, so quantizing the shape never disturbs the separately coded
+energy.
+
+\begin{concept}{The Pyramid Codebook}
+  The PVQ codebook of dimension $N$ and \emph{pulse count} $K$ is the set of all
+  integer vectors $\mathbf{y} \in \mathbb{Z}^N$ whose absolute components sum to
+  $K$:
+  \begin{equation}\label{eq:pvq_codebook}
+    S(N, K) = \left\{\mathbf{y} \in \mathbb{Z}^N :
+      \sum_{i=0}^{N-1} \abs{y_i} = K\right\}.
+  \end{equation}
+  Geometrically these are the lattice points on the surface of an $N$-dimensional
+  $L^1$ ball, the ``pyramid.'' A band's shape is coded by finding the codeword
+  $\mathbf{y}$ closest in direction to the unit shape, then transmitting which
+  codeword it is. On decode, $\mathbf{y}$ is read back and normalized to unit
+  norm, $\hat{\mathbf{x}} = \mathbf{y}/\norm{\mathbf{y}}$, and scaled by the
+  band's energy. The pulse count $K$ controls the resolution: more pulses mean a
+  denser codebook and a finer shape, and $K$ is exactly what the bit allocation
+  (\cref{subsec:celt_allocation}) decides per band.
+\end{concept}
+
+\subsubsection{The pulse search}
+
+Finding the best codeword is a search over $S(N,K)$, which would be enormous to
+enumerate, so CELT uses a greedy algorithm that adds pulses one at a time, each
+time placing a pulse in the position that most improves the correlation between
+the candidate $\mathbf{y}$ and the target shape $\mathbf{x}$. After each pulse,
+the quantity maximized is
+\begin{equation}\label{eq:pvq_search}
+  j^\star = \argmax_j \frac{(\mathbf{x}\cdot\mathbf{y} + x_j)^2}
+                           {\norm{\mathbf{y}}^2 + 2y_j + 1},
+\end{equation}
+the squared cosine similarity that would result from adding a pulse at position
+$j$. The algorithm starts from a projection of $\mathbf{x}$ onto the pyramid to
+place most of the pulses cheaply, then refines pulse by pulse. The inner loop of
+\cref{eq:pvq_search} is the single hottest computation in CELT encoding and is
+the subject of a dedicated SIMD kernel (\cref{subsec:simd_pvq}).
+
+\subsection{CWRS: Enumerating the Codebook}\label{subsec:cwrs}
+
+The PVQ search yields a codeword $\mathbf{y}$; the coder must transmit \emph{which}
+of the $V(N,K) = \abs{S(N,K)}$ codewords it is, as a uniform integer in
+$[0, V(N,K))$. This is the \termdef{combinatorial} step: a bijection between
+pulse vectors and indices, known in the Opus sources as CWRS (coding with
+replacement and signs, \S4.3.4.2).
+
+\begin{concept}{Counting Pulse Vectors}
+  Let $V(N, K)$ be the number of length-$N$ integer vectors with $K$ signed
+  pulses, and let $U(N, K)$ count those whose first nonzero entry is positive.
+  These satisfy the recurrences
+  \begin{align}
+    \label{eq:cwrs_u}
+    U(N, K) &= U(N-1, K) + U(N, K-1) + U(N-1, K-1), \\
+    \label{eq:cwrs_v}
+    V(N, K) &= U(N, K) + U(N, K+1),
+  \end{align}
+  with $U(0,0) = 1$. The three terms of \cref{eq:cwrs_u} correspond to the first
+  position holding zero, holding a pulse with more to come, or holding a pulse
+  that completes the budget. The index of a particular $\mathbf{y}$ is built by
+  walking the positions and, at each, adding the count of all codewords that
+  sort before the chosen one, the standard combinatorial-number-system ranking.
+\end{concept}
+
+Computing $U$ from \cref{eq:cwrs_u} on every band decode would cost $O(NK)$. The
+implementation instead precomputes the $U$ rows into a flat table once, so
+ranking and unranking a codeword become $O(N)$ table lookups. The table is small
+(a few hundred entries, generated on first use) and exploits the symmetry
+$U(n,k)=U(k,n)$ to stay compact:
+
+\begin{lstlisting}[language=Rust]
+// Build the U-table once: each entry is the recurrence of Eq. (cwrs_u).
+fn pvq_u_data() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| {
+        let mut uu = [[0u32; 177]; 15];
+        uu[0][0] = 1;
+        for a in 1..15 {
+            for b in 1..177 {
+                uu[a][b] = uu[a - 1][b]
+                    .wrapping_add(uu[a][b - 1])
+                    .wrapping_add(uu[a - 1][b - 1]);
+            }
+        }
+        /* flatten into a row-offset table */
+        flatten(uu)
+    })
+}
+\end{lstlisting}
+
+The decoder reads the uniform index from the range coder, unranks it to recover
+$\mathbf{y}$ through the table, and normalizes. Because the index is uniform over
+exactly $V(N,K)$ values, no bits are wasted: the shape costs precisely
+$\log_2 V(N,K)$ bits, which is what the allocator budgeted for.
+
+\subsection{Bit Allocation}\label{subsec:celt_allocation}
+
+The energy envelope and the PVQ shapes both consume bits, and the number of
+pulses $K$ available to each band is whatever the allocation leaves for it. The
+allocation is the arbiter that converts a frame's total bit budget into a
+per-band pulse count. Its defining constraint is subtle and important.
+
+\begin{concept}{The Allocation Must Be Implicit}
+  The decoder needs to know each band's pulse count \emph{before} it can decode
+  that band's shape, but the pulse counts are never transmitted: there are no
+  bits to spare for them. Instead, encoder and decoder run the \emph{same}
+  deterministic allocation procedure over the same inputs (the total budget, the
+  frame size, static tables, and a few coded parameters), and arrive at
+  identical per-band allocations. This is why the bit budget is tracked to
+  $1/8$-bit precision through \code{tell\_frac} (\cref{subsec:tell}): the
+  allocation arithmetic must produce bit-identical results on both sides, or the
+  decoder will read a band with the wrong pulse count and desynchronize from the
+  range coder. The allocation is, in effect, a pseudo-random function of the
+  budget that both parties compute independently.
+\end{concept}
+
+The procedure (\S4.3.3) works in units of $1/8$~bit (the constant
+$\mathrm{BITRES}=3$). It begins from a family of static \termdef{allocation
+vectors}, tabulated target bit counts per band for a range of quality levels,
+and interpolates between two adjacent vectors to match the available budget. The
+interpolation fraction is found by bisection: at each step it tentatively
+allocates at the midpoint, sums the cost over all bands (clamped to per-band
+caps, with bands below a floor skipped), and moves the bisection bound according
+to whether the total overran the budget.
+
+\begin{lstlisting}[language=Rust]
+// Bisect the interpolation fraction in 1/64 steps to fit `total`.
+let (mut lo, mut hi) = (0i32, 1 << ALLOC_STEPS);
+for _ in 0..ALLOC_STEPS {
+    let mid = (lo + hi) >> 1;
+    let mut psum = 0i32;
+    let mut done = false;
+    for j in (start..end).rev() {
+        let tmp = bits1[j] + ((mid * bits2[j]) >> ALLOC_STEPS);
+        if tmp >= thresh[j] || done { done = true; psum += tmp.min(cap[j]); }
+        else if tmp >= alloc_floor { psum += alloc_floor; }
+    }
+    if psum > total { hi = mid; } else { lo = mid; }
+}
+\end{lstlisting}
+
+Once the per-band bit targets are fixed, each band's allocation is split between
+\emph{fine-energy} bits (raw bits that refine the envelope) and \emph{shape}
+bits (the PVQ codeword). The conversion between a bit budget and a pulse count
+$K$ goes through a precomputed \termdef{pulse cache}: \code{bits2pulses} binary-
+searches the cache for the largest $K$ whose codeword fits the budget, and
+\code{pulses2bits} reports the exact cost $\lceil\log_2 V(N,K)\rceil$ of a given
+$K$. Surplus bits left after the split, the \emph{balance}, are carried forward
+to subsequent bands so nothing is wasted. The allocation also decides, from the
+budget, the boundary band for intensity stereo and whether to use dual stereo
+(\cref{subsec:celt_bands}), and it may explicitly \emph{skip} high bands when the
+budget cannot support them, coding the skip decisions as run-length flags.
+
+\subsection{Band Coding: Splits, Folding, and Stereo}\label{subsec:celt_bands}
+
+With energy and allocation settled, the band loop codes each band's shape. A
+band of $N$ coefficients is rarely quantized as one PVQ vector; instead it is
+recursively halved, with the split coded by an angle, until the pieces are small
+enough to quantize directly. Several refinements layer on top: spreading to
+decorrelate noisy bands, folding to fill empty ones, anti-collapse to repair
+transient artifacts, and stereo coupling.
+
+\subsubsection{Recursive splitting by angle}
+
+When a band is split in two, the energy is divided between the halves by an angle
+$\theta$: the lower half receives $\cos\theta$ of the amplitude and the upper
+$\sin\theta$. Quantizing $\theta$ (rather than two independent energies) keeps
+the total band energy exactly fixed, preserving the energy constraint through the
+recursion. The number of quantization levels for $\theta$ depends on the band's
+bit allocation, and the angle is coded with one of three probability models
+chosen by context (\S4.3.4.1): a \emph{uniform} PDF for ordinary time splits, a
+\emph{triangular} PDF that biases toward an even split for mono bands, and a
+\emph{step} PDF for the first stereo split. The recursion terminates when a sub-
+band is small enough, at which point it is coded by a single PVQ vector
+(\cref{subsec:pvq}).
+
+\subsubsection{Spreading rotation}
+
+Concentrating $K$ pulses in $N$ positions produces a sparse, spiky vector, which
+in a band that should sound noise-like is audible as tonal ``birdies.'' CELT
+counters this by applying a \termdef{spreading rotation}: a sequence of Givens
+rotations that smear the pulses' energy across the band without changing its
+norm. The amount of spreading (none, light, normal, or aggressive) is chosen by
+the encoder's tonality analysis (\cref{subsec:celt_encoder}) and signaled once
+per frame.
+
+\subsubsection{Folding and noise fill}
+
+When the allocation gives a band zero pulses, leaving it empty would create
+silent spectral holes. Instead CELT fills the band by \termdef{folding}: copying
+already-decoded coefficients from lower frequencies into the empty band, then
+renormalizing to the band's coded energy. When no suitable lower content exists,
+the band is filled with pseudo-random noise from a small linear congruential
+generator. The generator and the fold share the same role, supplying a plausible
+shape at the correct energy for bands too cheap to code explicitly.
+
+\begin{lstlisting}[language=Rust]
+// Linear congruential generator used for noise fill (Numerical Recipes constants).
+fn celt_lcg_rand(seed: u32) -> u32 {
+    seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223)
+}
+\end{lstlisting}
+
+\subsubsection{Collapse masks and anti-collapse}
+
+In a transient frame coded as $B$ short blocks (\cref{subsec:mdct}), a band's
+pulses may all land in a single short block, leaving the others at zero, a
+\termdef{collapse}. A collapsed block is silent for part of the frame, which can
+sound like a dropout. CELT tracks a \termdef{collapse mask}, one bit per short
+block per band, recording which blocks received energy. The \termdef{anti-
+collapse} step then injects a controlled amount of noise into the collapsed
+blocks, scaled to the minimum of the neighboring bands' energies, so every short
+block carries at least a floor of energy. The presence of anti-collapse is
+controlled by a single coded bit per transient frame.
+
+\subsubsection{Stereo coupling}
+
+For stereo input, CELT codes each band as a \emph{mid} (sum) and \emph{side}
+(difference) pair rather than left and right, because the mid/side
+representation concentrates energy in the mid channel and codes the stereo image
+efficiently. Three sub-modes apply, chosen per band by the allocation:
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{Mid/side with angle:} a stereo angle $\theta$ apportions energy
+    between mid and side, coded like the mono split above.
+  \item \textbf{Intensity stereo:} above a boundary band set by the budget, only
+    the mid is coded and the side is reconstructed by copying the mid, discarding
+    stereo detail where it is least audible (at high frequencies, low bitrates).
+  \item \textbf{Dual stereo:} the two channels are coded fully independently, used
+    when the channels are sufficiently decorrelated to justify the bits.
+\end{itemize}
+A special case handles bands of $N=2$, where a single angle suffices to code the
+stereo relationship directly.
+
+\subsubsection{Time-frequency reshaping}
+
+Within a frame, individual bands can opt for finer time resolution (at the
+expense of frequency resolution) or vice versa, independently of the global
+short-block decision. This is implemented with in-place Haar and Hadamard
+transforms that redistribute a band's coefficients between time and frequency
+before quantization. A per-frame \code{tf\_select} flag and per-band flags
+encode the choice, which the encoder optimizes by the analysis below.
+
+\subsection{The Encoder's Analysis}\label{subsec:celt_encoder}
+
+Everything to this point is shared by encoder and decoder; the decoder simply
+reads the parameters and follows. The encoder must \emph{decide} those
+parameters, and those decisions, not the bitstream format, are where encoders
+differ in quality. CELT's encoder runs several analyses per frame.
+
+\textbf{Transient detection.} The encoder decides whether to use short blocks by
+running the input through a high-pass filter and then forward and backward energy
+followers; a sharp rise in the high-passed energy relative to its smoothed
+envelope marks a transient. The high-pass is a second-order section, and its
+output drives the masking metric:
+
+\begin{lstlisting}[language=Rust]
+// High-pass filter: (1 - 2z^-1 + z^-2) / (1 - z^-1 + 0.5 z^-2).
+let (mut mem0, mut mem1) = (0.0f32, 0.0f32);
+for (t, &x) in tmp.iter_mut().zip(input.iter()) {
+    let y = mem0 + x;
+    let mem00 = mem0;
+    mem0 = mem0 - x + 0.5 * mem1;
+    mem1 = x - mem00;
+    *t = y;
+}
+\end{lstlisting}
+
+\textbf{Time-frequency analysis.} For the bands, the encoder chooses time-versus-
+frequency resolution by an $L^1$-metric minimization solved with a small Viterbi
+search (\code{tf\_analysis} and \code{tf\_select}), trading the cost of changing
+resolution against the coding gain it yields band by band.
+
+\textbf{Spreading decision.} A tonality measure over the spectrum selects the
+spreading amount (\cref{subsec:celt_bands}): tonal frames get little or no
+spreading, noisy frames get aggressive spreading.
+
+\textbf{Dynamic allocation and trim.} Two analyses shape the allocation before it
+runs. \termdef{Dynamic allocation} (\code{dynalloc\_analysis}) computes per-band
+importance boosts from a masking model, steering extra bits to perceptually
+important bands. The \termdef{allocation trim} (\code{alloc\_trim\_analysis})
+sets a single global parameter that tilts the budget toward low or high
+frequencies based on spectral tilt and transientness.
+
+\textbf{The pitch pre-filter.} Before the MDCT, the encoder optionally applies a
+comb \termdef{pre-filter} that whitens the signal's harmonic structure, the exact
+inverse of the comb post-filter the decoder applies after synthesis. Whitening
+the harmonics concentrates energy and improves coding efficiency on strongly
+tonal material. The pitch period and gain that parameterize the filter come from
+a pitch analysis (downsampling, decimated cross-correlation, and octave-error
+rejection) that mirrors the technique used for packet-loss concealment
+(\cref{subsec:plc}).
+
+\section{SILK: Linear-Predictive Coding}\label{sec:silk}
+
+SILK (\S4.2) is the speech half of Opus. Where CELT works in the frequency
+domain on arbitrary signals, SILK works in the time domain on a \emph{model} of
+how speech is produced, and codes only what the model fails to predict. This
+model-based approach is what lets SILK code intelligible speech at a few
+kilobits per second, far below what a general transform coder achieves. SILK runs
+at one of three internal rates (8, 12, or 16~kHz, for narrowband, mediumband, and
+wideband), in frames of 10, 20, 40, or 60~ms divided into 2 or 4 subframes.
+
+This section develops the model bottom-up: the source-filter idea
+(\cref{subsec:silk_model}), the short-term predictor and how it is estimated and
+represented (\cref{subsec:silk_lpc,subsec:silk_nlsf}), the long-term predictor
+that captures pitch (\cref{subsec:silk_ltp}), the gains and excitation coding
+(\cref{subsec:silk_gains,subsec:silk_excitation}), the noise-shaping quantizer at
+the encoder's heart (\cref{subsec:silk_nsq}), and the supporting machinery of
+stereo, resampling, and control (\cref{subsec:silk_stereo,subsec:silk_resampler,subsec:silk_control}).
+
+\subsection{The Source-Filter Model}\label{subsec:silk_model}
+
+\begin{concept}{Speech as Source and Filter}
+  Human speech is produced by an excitation source (the vocal folds, for voiced
+  sounds, or turbulent airflow, for unvoiced ones) passing through a filter (the
+  vocal tract, whose shape determines the formants we hear as vowels). Linear-
+  predictive coding~\cite{makhoul1975linear,rabiner1978digital} models this
+  directly: the vocal tract becomes an all-pole filter $1/A(z)$, and the
+  excitation becomes a sparse residual signal. The model predicts each sample
+  from a weighted sum of recent samples,
+  \begin{equation}\label{eq:lpc_predict}
+    \hat{s}[n] = -\sum_{k=1}^{p} a_k\, s[n-k],
+  \end{equation}
+  and codes only the residual $e[n] = s[n] - \hat{s}[n]$ that the prediction
+  misses. Because the residual carries far less energy and structure than the
+  original, it is cheap to code. SILK adds a second predictor for the residual's
+  own periodicity (pitch) and a noise-shaping loop that hides quantization noise
+  under the speech spectrum.
+\end{concept}
+
+The frame is the unit at which SILK transmits its model; the subframe is the unit
+at which the model is applied. Each frame carries one set of short-term filter
+coefficients (interpolated across subframes for 20~ms frames), and per-subframe
+gains and pitch parameters. The decoder reconstructs each frame by running the
+excitation through the long-term and short-term synthesis filters, then
+resampling to the output rate.
+
+\subsection{Short-Term Prediction}\label{subsec:silk_lpc}
+
+The short-term predictor of \cref{eq:lpc_predict} is a $p$-tap linear filter
+($p=10$ for narrowband and mediumband, $p=16$ for wideband). It comes in two
+forms that are exact inverses: the \termdef{analysis} filter $A(z)$, which the
+encoder applies to produce the residual, and the \termdef{synthesis} filter
+$1/A(z)$, which the decoder applies to reconstruct the signal.
+
+\begin{lstlisting}[language=Rust]
+// Analysis: e[n] = x[n] + sum_k a_k x[n-1-k]  (apply A(z))
+pub fn lpc_residual(samples: &[f32], coeffs: &LpcCoefficients) -> Vec<f32> {
+    /* residual[n] = samples[n] + sum coeffs[k] * samples[n-1-k] */
+}
+
+// Synthesis: y[n] = e[n] - sum_k a_k y[n-1-k]  (apply 1/A(z))
+pub fn lpc_synthesis(residual: &[f32], coeffs: &LpcCoefficients) -> Vec<f32> {
+    /* output[n] = residual[n] - sum coeffs[k] * output[n-1-k] */
+}
+\end{lstlisting}
+
+\subsubsection{Estimating the coefficients}
+
+The decoder receives the coefficients; the encoder must estimate them from the
+signal. Two classical methods apply. \termdef{Levinson-Durbin}
+recursion~\cite{levinson1947wiener} solves the normal equations relating the
+filter coefficients to the signal's autocorrelation, in $O(p^2)$ time, producing
+the minimum mean-square prediction error. \termdef{Burg's
+method}~\cite{burg1975maximum} instead estimates reflection coefficients directly
+from the signal by minimizing the sum of forward and backward prediction errors,
+which behaves better on the short analysis windows speech coding uses. The SILK
+encoder uses a modified Burg method, and caps the resulting filter's prediction
+gain to keep it numerically well-conditioned.
+
+\begin{implementation}{Levinson-Durbin Recursion}
+  The recursion builds the order-$p$ predictor from the order-$(p-1)$ predictor
+  by computing a reflection coefficient $k_m$ that drives the next prediction
+  error to its minimum, updating all coefficients in place:
+  \begin{lstlisting}[language=Rust]
+pub fn levinson_durbin(autocorr: &[f64], order: usize) -> Vec<f64> {
+    let mut a = vec![0.0; order + 1];
+    let mut err = autocorr[0];
+    for m in 1..=order {
+        let mut k = autocorr[m];
+        for i in 1..m { k += a[i] * autocorr[m - i]; }
+        k = -k / err;                       // reflection coefficient
+        a[m] = k;
+        for i in 1..=m / 2 {                // symmetric in-place update
+            let tmp = a[i] + k * a[m - i];
+            a[m - i] += k * a[i];
+            a[i] = tmp;
+        }
+        err *= 1.0 - k * k;                 // error shrinks each order
+    }
+    a
+}
+  \end{lstlisting}
+  The factor $1 - k_m^2$ is non-negative exactly when $\abs{k_m} \le 1$, the
+  condition for filter stability, which is why reflection coefficients are a
+  convenient parameterization.
+\end{implementation}
+
+\subsection{Line Spectral Frequencies}\label{subsec:silk_nlsf}
+
+The encoder cannot transmit LPC coefficients directly: they are extremely
+sensitive to quantization, and a small rounding error can push the all-pole
+synthesis filter outside the unit circle, making it unstable and the decoded
+signal explode. SILK transmits the filter in a different representation, the
+\termdef{line spectral frequencies} (LSFs), which is built for quantization.
+
+\begin{concept}{Why Line Spectral Frequencies}
+  The order-$p$ polynomial $A(z)$ is decomposed into a symmetric and an
+  antisymmetric polynomial,
+  \begin{align}
+    P(z) &= A(z) + z^{-(p+1)} A(z^{-1}), \\
+    Q(z) &= A(z) - z^{-(p+1)} A(z^{-1}),
+  \end{align}
+  whose roots, the LSFs, all lie \emph{on} the unit circle and
+  \emph{interlace}~\cite{itakura1975line}. This representation has three
+  properties that make it ideal for coding. First, stability is trivially
+  checked and enforced: as long as the LSFs stay ordered, the reconstructed
+  filter is stable. Second, the LSFs are localized in frequency, so each one
+  affects the spectrum mainly near its own frequency, and a quantization error in
+  one LSF stays local rather than corrupting the whole spectrum. Third, they
+  interpolate gracefully, so SILK can transmit one set per frame and interpolate
+  across subframes. SILK uses \termdef{normalized} LSFs (NLSFs), scaled so the
+  frequency range maps to $[0, 1)$ and stored as \Q{15} integers.
+\end{concept}
+
+\subsubsection{The two-stage vector quantizer}
+
+NLSFs are coded with a two-stage vector quantizer (\S4.2.7.5). The first stage
+selects one of 32 codebook vectors that approximates the whole NLSF vector,
+coded with an entropy model. The second stage codes the per-coefficient residual
+between the true NLSFs and the first-stage approximation, using a predictive
+scheme (each residual partly predicted from the previous) and an arithmetic-coded
+index. The residual quantization is weighted by \termdef{Laroia
+weights}~\cite{laroia1991robust}, which approximate each coefficient's perceptual
+sensitivity (inversely related to its spacing from its neighbors), so bits are
+spent where the ear notices. The encoder searches this quantizer with a delayed-
+decision trellis, keeping several candidate paths alive to find a low-rate,
+low-distortion combination.
+
+\subsubsection{Reconstruction and stability enforcement}
+
+The decoder reverses the process: dequantize the residual, add the first-stage
+vector, enforce a minimum spacing between adjacent NLSFs to guarantee stability,
+and convert back to LPC coefficients. The conversion (\code{nlsf2a}) builds the
+$P$ and $Q$ polynomials from the cosines of the NLSFs and combines them. Even
+after stabilization, the resulting filter is checked for stability, and if it
+fails, bandwidth expansion (scaling the coefficients toward zero) is applied
+until it passes:
+
+\begin{lstlisting}[language=Rust]
+// After converting NLSFs to LPC, force stability by bandwidth expansion.
+while lpc_inverse_pred_gain(&a_q12[..d]) == 0 && i < MAX_LPC_STABILIZE_ITERATIONS {
+    bwexpander_32(&mut a32_qa1[..d], 65536 - (2 << i));  // shrink toward zero
+    /* re-quantize a_q12 from a32_qa1 and re-test */
+    i += 1;
+}
+\end{lstlisting}
+
+For 20~ms frames, the decoder interpolates between the previous frame's NLSFs and
+the current frame's, using a 2-bit interpolation factor, so the filter evolves
+smoothly across the frame's first and second halves rather than jumping at the
+midpoint.
+
+\subsection{Long-Term Prediction}\label{subsec:silk_ltp}
+
+Short-term prediction removes the spectral envelope, but the residual of voiced
+speech is still strongly periodic at the pitch period: the vocal folds produce a
+pulse train, and successive pitch periods resemble one another. SILK removes this
+redundancy with a second predictor, the \termdef{long-term predictor} (LTP),
+which predicts the current residual from the residual one pitch period earlier.
+
+\begin{concept}{Pitch Prediction with a Five-Tap Filter}
+  For a voiced subframe with pitch lag $T$ (in samples), the LTP predicts the
+  residual $e[n]$ from a five-tap filter applied around $e[n-T]$:
+  \begin{equation}\label{eq:ltp}
+    \hat{e}[n] = \sum_{j=-2}^{2} b_j\, e[n - T + j].
+  \end{equation}
+  The five taps $b_j$ let the predictor track a pitch period that does not fall
+  exactly on a sample boundary and that changes shape slowly from period to
+  period. What remains after long-term prediction, the doubly-predicted residual,
+  is the sparse excitation that SILK actually codes. The pitch lag $T$ and the
+  taps $b_j$ are themselves transmitted: the lag as a per-frame absolute value
+  plus per-subframe offsets from a contour codebook, and the taps as an index
+  into one of three gain codebooks.
+\end{concept}
+
+The lag is decoded as a base lag plus a per-subframe contour offset, clamped to
+the valid pitch range for the internal rate:
+
+\begin{lstlisting}[language=Rust]
+let (min_lag, max_lag) = (PE_MIN_LAG_MS * fs_khz, PE_MAX_LAG_MS * fs_khz);
+let lag = min_lag + i32::from(lag_index);
+for (k, out) in pitch_lags.iter_mut().enumerate().take(nb_subfr) {
+    *out = (lag + contour_offset(k)).clamp(min_lag, max_lag);  // per-subframe lag
+}
+\end{lstlisting}
+
+The five-tap gains come from one of three codebooks of 8, 16, or 32 vectors,
+selected by a per-frame \emph{periodicity index} that trades codebook size
+against the bits to address it: highly periodic speech justifies the larger, more
+precise codebook. The encoder chooses the lag with a three-stage pitch search
+(\cref{subsec:silk_control}) and the gains with a rate-distortion-weighted vector
+quantizer.
+
+\subsection{Subframe Gains}\label{subsec:silk_gains}
+
+Each subframe carries a gain that scales the excitation before it enters the
+synthesis filters, tracking the signal's changing loudness. Gains are quantized
+in the $\log_2$ domain across 64 levels, so the quantization step is a constant
+ratio rather than a constant difference, which matches the multiplicative way
+loudness varies. After the first subframe, gains are delta-coded against the
+previous subframe, with a wider ``double step'' available for rapid changes. The
+decoder converts the log-domain index back to a linear \Q{16} gain through a
+piecewise-parabolic $\log_2$-to-linear approximation:
+
+\begin{lstlisting}[language=Rust]
+for k in 0..nb_subfr {
+    if k == 0 && !conditional {
+        *prev_ind = i32::from(ind[k]).max(i32::from(*prev_ind) - 16) as i8;
+    } else {
+        let ind_tmp = i32::from(ind[k]) + MIN_DELTA_GAIN_QUANT;   // delta-coded
+        /* expand the step beyond a threshold for fast gain changes */
+        *prev_ind = update_with_double_step(*prev_ind, ind_tmp);
+    }
+    *prev_ind = (*prev_ind).clamp(0, N_LEVELS_QGAIN - 1) as i8;
+    gain_q16[k] = log2lin(/* index mapped into log domain */);  // back to linear
+}
+\end{lstlisting}
+
+\subsection{The Excitation and the Shell Coder}\label{subsec:silk_excitation}
+
+After both predictors and the gain, what remains to code is the
+\termdef{excitation}: the quantized residual, a mostly-small integer per sample.
+SILK codes it in 16-sample blocks with a \termdef{shell coder} (\S4.2.7.8), a
+recursive scheme that codes the \emph{distribution} of pulses within a block
+rather than each sample independently.
+
+\begin{concept}{Recursive Pulse Splitting}
+  Given the total number of pulses in a 16-sample block, the shell coder splits
+  that total down a binary tree: the 16-sample count divides into two 8-sample
+  counts, each into two 4-sample counts, and so on down to individual samples.
+  At each node only the \emph{split} is coded, that is, how the parent's pulse
+  count divides between its two children, using a probability model conditioned on
+  the parent count. This is efficient because the total pulse count already
+  constrains the splits: a block with two pulses has far fewer ways to distribute
+  them than a block with ten, and the conditional models capture exactly that.
+  Pulse magnitudes beyond what the tree codes directly are sent as additional
+  least-significant-bit planes, and each non-zero sample's sign is coded
+  afterward with a probability that depends on the signal type, the quantization
+  offset, and the block's pulse count.
+\end{concept}
+
+\begin{lstlisting}[language=Rust]
+// One node of the shell tree: split a parent count into two child counts.
+fn decode_split(dec: &mut RangeDecoder, p: i32, shell_table: &[u8]) -> (i32, i32) {
+    if p > 0 {
+        let off = SHELL_CODE_TABLE_OFFSETS[p as usize] as usize;
+        let child1 = dec.decode_icdf(&shell_table[off..], 8) as i32;
+        (child1, p - child1)            // the other child is the remainder
+    } else {
+        (0, 0)
+    }
+}
+\end{lstlisting}
+
+A per-frame \termdef{rate level} selects which family of shell probability
+tables to use, letting the excitation coder adapt its models to the bitrate.
+
+\subsection{The Noise-Shaping Quantizer}\label{subsec:silk_nsq}
+
+The noise-shaping quantizer (NSQ) is the central kernel of the SILK encoder, the
+stage that actually decides the excitation values. A naive quantizer would round
+the residual to the nearest level independently per sample; the NSQ does
+something more sophisticated, choosing each excitation sample to shape the
+spectrum of the resulting quantization \emph{noise} so that it hides beneath the
+speech.
+
+\begin{concept}{Shaping Quantization Noise}
+  Quantization injects error, and that error has a spectrum. If the error
+  spectrum is flat (white), it is audible wherever the speech is quiet. The
+  insight of noise shaping is to spectrally color the error so it follows the
+  speech spectrum, concentrating noise at frequencies where the speech is loud
+  enough to mask it~\cite{rabiner1978digital}. The NSQ achieves this by running
+  the quantization inside a feedback loop: the error from past samples is
+  filtered by a \termdef{noise-shaping filter} and fed back into the current
+  prediction, so the quantizer is steered to make errors whose spectrum matches a
+  perceptual target. Because the loop reconstructs exactly the signal the decoder
+  will produce, the encoder always knows the true reconstruction state, which is
+  what allows the per-sample decisions to be optimal rather than open-loop.
+\end{concept}
+
+For each sample the NSQ forms the short-term and long-term predictions, adds the
+shaping feedback, quantizes the result by a rate-distortion rule (minimizing
+$\abs{\text{error}} + \lambda \cdot \text{bits}$, where $\lambda$ comes from the
+target coding quality), emits the excitation value, and updates its filter
+states. The prediction and feedback dot products are computed in fixed point,
+bit-identically to the reference, so the encoder's reconstruction matches the
+decoder's to the sample:
+
+\begin{lstlisting}[language=Rust]
+// Short-term prediction: a fixed-point dot product, Q10, matching SMLAWB chains.
+fn short_prediction(buf: &[i32], base: usize, coef_rev: &[i16]) -> i32 {
+    let order = coef_rev.len();
+    crate::simd::dot_smlawb_q16((order >> 1) as i32, &buf[base + 1 - order..=base], coef_rev)
+}
+\end{lstlisting}
+
+\subsubsection{Noise-shaping analysis}
+
+The filters the NSQ applies are designed once per frame by the \termdef{noise-
+shaping analysis}. It examines the speech and produces four shaping controls: an
+auto-regressive (AR) filter derived from the LPC envelope and bandwidth-expanded
+to set the overall noise shape; a spectral \termdef{tilt} that emphasizes or de-
+emphasizes low frequencies; a low-frequency shaper; and, for voiced frames, a
+\termdef{harmonic shaper} that shapes noise around the pitch harmonics. These are
+driven by the target SNR and the voice-activity analysis so that the noise
+follows the masking threshold as the signal changes.
+
+\subsection{Stereo Prediction}\label{subsec:silk_stereo}
+
+Stereo SILK codes a mid channel (the average of left and right) and a predicted
+side channel (their difference), because the side is usually well predicted from
+the mid and so costs few bits. The encoder estimates per-frame prediction weights
+that reconstruct the side from a three-tap smoothed mid plus a one-tap lagged
+mid; the weights are quantized, coded, and interpolated over the frame's first
+8~ms to avoid discontinuities. When the side is sufficiently predictable, a
+\termdef{mid-only} flag drops it entirely. The decoder applies the inverse:
+
+\begin{lstlisting}[language=Rust]
+// Reconstruct the side channel from the mid using interpolated predictor weights,
+// then convert mid/side back to left/right.
+for n in 0..frame_length {
+    let sum  = i32::from(x1[n + 1]) + i32::from(x2[n + 1]);  // L = mid + side
+    let diff = i32::from(x1[n + 1]) - i32::from(x2[n + 1]);  // R = mid - side
+    x1[n + 1] = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    x2[n + 1] = diff.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+}
+\end{lstlisting}
+
+\subsection{Resampling}\label{subsec:silk_resampler}
+
+SILK runs at 8, 12, or 16~kHz internally, but the caller asks for 8, 12, 16, 24,
+or 48~kHz output, so the decoder ends with a resampling stage (\S4.2.8). The
+method depends on the ratio: equal rates pass through, a factor-of-two change
+uses a cascade of second-order allpass sections (cheaper and lower-delay than a
+long FIR for exact 2$\times$), and other ratios combine the 2$\times$ allpass with
+a fractional-delay FIR interpolation. The encoder's front-end runs the inverse,
+decimating 48~kHz input down to the internal rate; its half-band and 2/3-band
+decimators are pinned bit-exactly against the reference, since the resampled
+signal is what the rest of the encoder analyzes.
+
+\subsection{Voice Activity, Pitch, and Rate Control}\label{subsec:silk_control}
+
+Three encoder analyses decide the parameters the rest of SILK consumes.
+
+\textbf{Voice activity detection.} The VAD splits each frame into four frequency
+bands with a tree of allpass half-band filters, tracks the noise floor in each
+band, and maps the per-band signal-to-noise ratios through a sigmoid to a
+speech-activity probability (a \Q{8} value). This probability, along with a
+spectral-tilt measure, drives the noise-shaping analysis, the gain control, and
+the pitch threshold, so that the codec spends its effort where there is speech.
+
+\textbf{Pitch analysis.} The pitch lag is found by a three-stage search of
+increasing precision: a coarse cross-correlation at 4~kHz proposes candidate
+lags, a refinement at 8~kHz searches a small contour codebook around them, and a
+final search at the internal rate locks in the per-subframe lags. The search also
+classifies the frame as voiced or unvoiced, which selects whether the long-term
+predictor is used at all.
+
+\textbf{Rate control.} A target bitrate is translated into a target coding SNR
+through per-bandwidth tables, with an adjustment for the shorter 10~ms frames.
+The coding SNR then sets the rate-distortion trade-off $\lambda$ in the NSQ and
+the aggressiveness of the noise shaping. When a coded frame would exceed a hard
+byte budget, the gains are scaled coarser and the frame re-encoded until it fits,
+which is how SILK honors a bitrate cap and how the hybrid mode keeps room for
+CELT's high band (\cref{subsec:hybrid}).
+
+\subsection{Packet-Loss Concealment in SILK}\label{subsec:silk_plc}
+
+When a SILK frame is lost, the decoder conceals it by extrapolating the last good
+frame's model: it continues the pitch excitation with progressively stronger
+attenuation, drifts the pitch lag, and fades toward the spectral envelope of the
+preceding frames, mixing in comfort noise estimated from the recent signal. The
+attenuation and pitch-drift constants are tuned so a short loss is inaudible and
+a long one decays gracefully to silence rather than repeating a buzz. This is the
+SILK-specific counterpart to the general concealment logic in
+\cref{subsec:plc}.
+
+\section{The Opus Layer}\label{sec:opus_layer}
+
+SILK and CELT are complete coders on their own. The Opus layer (\S4 for the
+decoder, \S5 for the encoder) is what makes them one codec: it dispatches each
+frame to the right coder, runs both together in hybrid mode, smooths the
+transitions when the mode changes between frames, and implements the resilience
+features (concealment, forward error correction, discontinuous transmission)
+that operate above either coder. This layer holds the cross-frame state that
+neither coder can see on its own.
+
+\subsection{Mode Dispatch}\label{subsec:dispatch}
+
+The TOC byte names the mode; the decoder dispatches accordingly. A frame's bytes
+become a single range decoder, and the SILK half (if any) decodes first,
+followed by the CELT half (if any), both drawing from the same range decoder so
+the bitstream is one continuous arithmetic-coded message. After both halves, the
+internal output is resampled to the API rate and any cross-frame smoothing is
+applied. The skeleton of the per-frame decode is:
+
+\begin{lstlisting}[language=Rust]
+let mut dec = RangeDecoder::new(data);
+if mode != Mode::CeltOnly {
+    // SILK half: low band (SILK-only) or 0..8 kHz (hybrid), at 8/12/16 kHz.
+    self.silk.decode(&mut dec, &ctl, /* first call */, &mut pcm_silk);
+    for (p, &s) in pcm.iter_mut().zip(pcm_silk.iter()) {
+        *p += f32::from(s) / 32768.0;
+    }
+}
+// ... optional redundancy handling ...
+if mode != Mode::SilkOnly {
+    // CELT half: full band (CELT-only) or bands 17..end (hybrid).
+    let start_band = if mode == Mode::CeltOnly { 0 } else { 17 };
+    pcm = self.celt.decode_frame(&mut dec, len, frame_size,
+                                 self.stream_channels, start_band, celt_end);
+}
+self.final_range = dec.range_size() ^ redundant_rng;
+\end{lstlisting}
+
+\subsection{Hybrid Mode and the Crossover}\label{subsec:hybrid}
+
+Hybrid mode is the reason SILK and CELT share a range coder. In a hybrid frame,
+SILK codes the signal up to roughly 8~kHz and CELT codes everything above, and
+the two contributions are summed (SILK's after resampling its 16~kHz output to
+48~kHz) to reconstruct the full-band signal.
+
+\begin{concept}{Splitting the Spectrum Between Two Coders}
+  CELT's band structure assigns a fixed range of MDCT bands to each frequency
+  region. In hybrid mode, CELT simply starts at band 17 (about 8~kHz) instead of
+  band 0, leaving the bands below for SILK. The crossover is not a filter but a
+  bookkeeping boundary: SILK is given the low band as its full-band wideband
+  signal, and CELT is told to begin coding at band 17. Because both write into
+  one range coder, the decoder reads the SILK parameters, then the CELT
+  parameters, with no marker between them; the byte where SILK ends and CELT
+  begins is wherever the SILK decode happens to leave the range coder. The
+  highest CELT band depends on the audio bandwidth: super-wideband stops at band
+  19, fullband at band 21.
+\end{concept}
+
+The encoder side must budget the shared bytes so that CELT always has room for
+its high band. It computes a SILK bitrate from a rate table, caps the SILK low
+band to a hard byte budget, and lets CELT fill the remainder, all into one range
+encoder:
+
+\begin{lstlisting}[language=Rust]
+let celt_floor = (celt_end - 17) * 3 + 3;          // min bytes for the high band
+let silk_cap = nb_bytes.saturating_sub(celt_floor).max(8);
+let mut enc = RangeEncoder::new(nb_bytes);
+silk.encode_into(&mut enc, &internal, Some((silk_cap * 8) as i32));  // capped
+self.celt.encode_hybrid_into(&mut enc, pcm, nb_bytes, celt_end);     // fills rest
+\end{lstlisting}
+
+\subsection{Mode Transitions and Redundancy}\label{subsec:redundancy}
+
+Because the mode can change from one packet to the next, the decoder must bridge
+discontinuities when, say, a SILK-only packet is followed by a CELT-only packet.
+The coders carry independent internal state (filter memories, overlap buffers),
+and switching cold would click. Opus addresses this with two mechanisms: state
+resets at the boundary, and an optional \termdef{redundancy} frame.
+
+\begin{concept}{Redundancy Frames at Transitions}
+  A redundancy frame is a short (5~ms) CELT frame embedded in a SILK or hybrid
+  packet, used to fill the gap during a mode switch. When switching from CELT to
+  SILK, the redundant CELT frame covers the start of the SILK packet, which has
+  no valid CELT history; when switching from SILK to CELT, it covers the end. The
+  decoder cross-fades between the redundant frame and the primary decode over a
+  2.5~ms overlap using a squared Vorbis window, so the energy sums to unity across
+  the splice and no discontinuity is heard. The presence and direction of
+  redundancy are coded with a few bits at the boundary of the SILK and CELT data.
+\end{concept}
+
+The crossfade is the same power-complementary mix used throughout Opus, applied
+sample by sample over the overlap:
+
+\begin{lstlisting}[language=Rust]
+fn smooth_fade(in1: &[f32], in2: &[f32], out: &mut [f32],
+               overlap: usize, channels: usize, inc: usize) {
+    for c in 0..channels {
+        for i in 0..overlap {
+            let w = WINDOW120[i * inc] * WINDOW120[i * inc];   // squared window
+            out[i * channels + c] =
+                w * in2[i * channels + c] + (1.0 - w) * in1[i * channels + c];
+        }
+    }
+}
+\end{lstlisting}
+
+\subsection{Packet-Loss Concealment}\label{subsec:plc}
+
+When a packet does not arrive, the decoder must produce a plausible frame of
+audio rather than a gap. This is \termdef{packet-loss concealment} (PLC). Opus
+conceals in whichever mode was last active: the CELT concealer extrapolates the
+last frame's pitch period with decaying gain, and the SILK concealer continues
+its excitation model (\cref{subsec:silk_plc}). A loss is signaled to the decoder
+by handing it an empty or single-byte packet, which it routes to the concealer
+for the expected frame duration:
+
+\begin{lstlisting}[language=Rust]
+if data.len() <= 1 {
+    return Ok(self.decode_lost(self.last_frame_size / self.ds));
+}
+\end{lstlisting}
+
+\subsection{In-Band Forward Error Correction}\label{subsec:fec}
+
+Concealment hides a loss but cannot recover the lost content. Opus can do better
+for speech through \termdef{in-band forward error correction} (FEC): a SILK or
+hybrid packet may carry a second, low-bitrate copy of the \emph{previous} frame,
+called \termdef{LBRR} (low-bitrate redundancy). If a packet is lost but the next
+one arrives, the decoder extracts the LBRR copy of the lost frame from the new
+packet and decodes it instead of concealing, recovering a degraded but real
+version of the audio. FEC is engaged through a separate decode entry point that,
+on loss, prefers the LBRR data when present and conceals only when it is absent.
+The cost is a modest bitrate increase on the carrying packets, which the encoder
+budgets only when packet loss is expected.
+
+\subsection{Discontinuous Transmission}\label{subsec:dtx}
+
+During silence there is nothing to code, and continuing to send full frames
+wastes bandwidth. \termdef{Discontinuous transmission} (DTX) lets the encoder
+stop sending audio frames during inactivity, emitting only occasional one-byte
+TOC packets that the decoder conceals as comfort noise. The decision is driven by
+an activity detector that tracks the background noise floor, so DTX engages
+during genuine pauses even when there is audible ambient noise, not only during
+digital silence:
+
+\begin{lstlisting}[language=Rust]
+fn frame_active(&mut self, pcm: &[f32]) -> bool {
+    let ms = pcm.iter().map(|&v| v * v).sum::<f32>() / pcm.len() as f32;
+    // Track the minimum energy with a slow upward leak (the noise floor).
+    self.dtx_noise_floor = if ms < self.dtx_noise_floor { ms }
+                           else { self.dtx_noise_floor * 1.0003 };
+    ms > (self.dtx_noise_floor * ACTIVE_RATIO).max(ABS_FLOOR)
+}
+\end{lstlisting}
+
+After a configured period of inactivity, the encoder drops to TOC-only packets,
+cutting the silence bitrate to a fraction of a kilobit per second, and resumes
+full coding the moment activity returns.
+
+\subsection{The Encoder's Mode Selection}\label{subsec:encode_auto}
+
+The encoder's top level chooses a mode per frame from the frame size and target
+bitrate. Short frames (2.5 and 5~ms) can only be CELT; long frames (40 and
+60~ms) can only be SILK; the 10 and 20~ms sizes admit all three, and the choice
+falls to SILK for low-bitrate speech bandwidths, hybrid for the higher bandwidths
+at moderate rates, and CELT otherwise. Ahead of every mode, the input passes
+through a 3~Hz one-pole high-pass that removes DC and sub-audible rumble before
+coding, with its state carried across frames so the filter does not restart each
+frame.
 
 % ===END-OF-MANUAL===
