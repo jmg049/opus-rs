@@ -103,28 +103,31 @@ libopus's default (what callers usually get):
 
 | Mode | `opus_native` | libopus c0 | libopus c10 (default) |
 |------|---------------|------------|-----------------------|
-| SILK wideband 16 kb/s | **573×** | 738× | 220× |
-| hybrid fullband 32 kb/s | **347×** | 554× | 190× |
-| CELT fullband 64 kb/s | **659×** | 1087× | 432× |
+| SILK wideband 16 kb/s | **565×** | 735× | 218× |
+| hybrid fullband 32 kb/s | **347×** | 555× | 192× |
+| CELT fullband 64 kb/s | **671×** | 1090× | 430× |
 
 `opus_native` encodes **faster than libopus at its default complexity on every
 mode** (1.5-2.6×), and reaches 0.61-0.78× of libopus's matched complexity-0
 speed - up from ~0.3-0.5× - after SIMD (AVX2+FMA / SSE2) of the encoder's hot
 loops:
 
-- **CELT**: the PVQ pulse search; the pre-filter pitch analysis
-  (`celt_pitch_xcorr` + downsampler whitening, two-thirds of CELT encode);
-  reused per-frame scratch buffers (the allocator zeroing was ~9%).
+- **CELT**: the PVQ pulse search (SSE2 *and* an AVX2 path libopus doesn't ship);
+  the pre-filter pitch analysis (`celt_pitch_xcorr` + downsampler whitening,
+  two-thirds of CELT encode); the forward MDCT pre-rotation (folded into a
+  precomputed-twiddle complex multiply); reused per-frame and per-band scratch
+  buffers.
 - **SILK**: the pitch analysis (cross-/autocorrelation, LPC whitening) and Burg
   LPC; the front-end 48→16 kHz resampler, reworked from a scalar fixed-point
   FIR to a float SIMD decimator (it was the second-largest SILK cost); and the
   NSQ prediction filters, with a bit-exact fixed-point SIMD dot so the bitstream
   is unchanged.
 
-The remaining gap to complexity-0 is the serial recurrences - pre-emphasis, the
-transient detector's IIR filters, the NSQ rate-distortion loop, the NLSF
-delayed-decision VQ - which the reference also runs scalar. Every mode encodes
-and decodes at hundreds of × realtime.
+The remaining gap to complexity-0 is genuinely serial or fixed-point work the
+reference also runs scalar - pre-emphasis, the transient detector's IIR filters,
+the NSQ rate-distortion loop, the NLSF delayed-decision VQ, and the MDCT post-
+rotation (a scatter-write the float build can't vectorise without AVX-512). Every
+mode encodes and decodes at hundreds of × realtime.
 
 ## Conformance
 
