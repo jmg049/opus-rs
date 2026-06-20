@@ -62,6 +62,37 @@ fn dot_scalar(x: &[f32], y: &[f32]) -> f32 {
     s
 }
 
+/// `Σ x[i]·y[i]` accumulated in `f64` (inputs are `f32`). For the SILK pitch
+/// analysis, whose reference helpers accumulate in double precision and whose
+/// outputs are pinned against the reference - using a `f64` accumulator keeps
+/// the result within the pin tolerance where an `f32` accumulator might drift.
+/// `y` must be at least as long as `x`.
+#[must_use]
+#[cfg_attr(target_arch = "x86_64", allow(unsafe_code))]
+pub(crate) fn dot_f64(x: &[f32], y: &[f32]) -> f64 {
+    debug_assert!(y.len() >= x.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: both slices expose ≥ `x.len()` lanes; loads are width-masked
+        // with a scalar tail. AVX2 gated by runtime detection, SSE2 baseline.
+        unsafe {
+            if has_avx2() {
+                dot_f64_avx2(x, y)
+            } else {
+                dot_f64_sse2(x, y)
+            }
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut s = 0.0f64;
+        for i in 0..x.len() {
+            s += f64::from(x[i]) * f64::from(y[i]);
+        }
+        s
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -225,5 +256,63 @@ unsafe fn hsum256(v: core::arch::x86_64::__m256) -> f32 {
         let lo = _mm256_castps256_ps128(v);
         let hi = _mm256_extractf128_ps::<1>(v);
         hsum128(_mm_add_ps(lo, hi))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f64_avx2(x: &[f32], y: &[f32]) -> f64 {
+    use core::arch::x86_64::*;
+    let n = x.len();
+    let (xp, yp) = (x.as_ptr(), y.as_ptr());
+    // SAFETY: each 4-wide f32 load starts at `i` with `i + 4 ≤ n ≤ len`; the
+    // products are widened to f64 and accumulated in four f64 lanes.
+    unsafe {
+        let mut acc = _mm256_setzero_pd();
+        let mut i = 0;
+        while i + 4 <= n {
+            let xf = _mm256_cvtps_pd(_mm_loadu_ps(xp.add(i)));
+            let yf = _mm256_cvtps_pd(_mm_loadu_ps(yp.add(i)));
+            acc = _mm256_fmadd_pd(xf, yf, acc);
+            i += 4;
+        }
+        // Horizontal sum of the 4 f64 lanes.
+        let lo = _mm256_castpd256_pd128(acc);
+        let hi = _mm256_extractf128_pd::<1>(acc);
+        let s2 = _mm_add_pd(lo, hi);
+        let mut s = _mm_cvtsd_f64(_mm_add_pd(s2, _mm_unpackhi_pd(s2, s2)));
+        while i < n {
+            s += f64::from(*xp.add(i)) * f64::from(*yp.add(i));
+            i += 1;
+        }
+        s
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+unsafe fn dot_f64_sse2(x: &[f32], y: &[f32]) -> f64 {
+    use core::arch::x86_64::*;
+    let n = x.len();
+    let (xp, yp) = (x.as_ptr(), y.as_ptr());
+    // SAFETY: each 2-wide f64 widening reads f32 lanes `i..i+2 ≤ n ≤ len`;
+    // SSE2 (`cvtps2pd` widens the low two f32) is baseline on x86-64.
+    unsafe {
+        let mut acc = _mm_setzero_pd();
+        let mut i = 0;
+        while i + 2 <= n {
+            // Load 2 f32 and widen the low pair to 2 f64.
+            let xf = _mm_cvtps_pd(_mm_castsi128_ps(_mm_loadl_epi64(xp.add(i).cast())));
+            let yf = _mm_cvtps_pd(_mm_castsi128_ps(_mm_loadl_epi64(yp.add(i).cast())));
+            acc = _mm_add_pd(acc, _mm_mul_pd(xf, yf));
+            i += 2;
+        }
+        let mut s = _mm_cvtsd_f64(_mm_add_pd(acc, _mm_unpackhi_pd(acc, acc)));
+        while i < n {
+            s += f64::from(*xp.add(i)) * f64::from(*yp.add(i));
+            i += 1;
+        }
+        s
     }
 }

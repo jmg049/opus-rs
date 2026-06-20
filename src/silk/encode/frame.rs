@@ -140,7 +140,10 @@ impl SilkChannelEncoder {
 
         // Voice-activity analysis: speech-activity, spectral tilt and per-band
         // input quality, which tune the pitch threshold, noise shaping and gains.
-        let vad = self.vad.get_sa_q8(input, frame_length, self.fs_khz);
+        let vad = {
+            let _g = crate::prof::scope("silk:vad");
+            self.vad.get_sa_q8(input, frame_length, self.fs_khz)
+        };
 
         // Pitch analysis: whiten and search for the lag. `pitch_x_buf` holds
         // `ltp_mem_length` of history, the frame, then `la_pitch` lookahead;
@@ -155,6 +158,7 @@ impl SilkChannelEncoder {
             pitch_x_buf[ltp_mem_length + i] = f32::from(v);
         }
         let mut res = vec![0.0f32; buf_len];
+        let _pl_g = crate::prof::scope("silk:find_pitch_lags");
         let pl = find_pitch_lags(
             &pitch_x_buf,
             &mut res,
@@ -169,6 +173,7 @@ impl SilkChannelEncoder {
             vad.input_tilt_q15,
             &mut self.ltp_corr,
         );
+        drop(_pl_g);
         let is_voiced = pl.voicing == 0;
         let signal_type = if is_voiced { TYPE_VOICED } else { TYPE_UNVOICED };
         let pitch_l = pl.pitch_l;
@@ -203,7 +208,10 @@ impl SilkChannelEncoder {
             pred_gain: pl.pred_gain,
             pitch_l,
         };
-        let shp = noise_shape_analysis(&mut self.shape, &shape_cfg, &res_f, &x_buf);
+        let shp = {
+            let _g = crate::prof::scope("silk:noise_shape");
+            noise_shape_analysis(&mut self.shape, &shape_cfg, &res_f, &x_buf)
+        };
 
         // `silk_find_pred_coefs_FLP`: short- and long-term prediction analysis
         // on the gain-normalised input. `LPC_in_pre` holds, per subframe,
@@ -226,6 +234,7 @@ impl SilkChannelEncoder {
             // LTP correlation + gain VQ on the whitened residual.
             let mut xx = vec![0.0f32; self.nb_subfr * LTP_ORDER * LTP_ORDER];
             let mut x_x = vec![0.0f32; self.nb_subfr * LTP_ORDER];
+            let _g = crate::prof::scope("silk:find_ltp");
             find_ltp(
                 &res,
                 ltp_mem_length,
@@ -235,7 +244,11 @@ impl SilkChannelEncoder {
                 &mut xx,
                 &mut x_x,
             );
-            let g = quant_ltp_gains(&xx, &x_x, subfr_length as i32, self.nb_subfr, &mut self.sum_log_gain_q7);
+            drop(_g);
+            let g = {
+                let _g = crate::prof::scope("silk:quant_ltp_gains");
+                quant_ltp_gains(&xx, &x_x, subfr_length as i32, self.nb_subfr, &mut self.sum_log_gain_q7)
+            };
             ltp_coef = g.b_q14;
             ltp_index[..self.nb_subfr].copy_from_slice(&g.cbk_index[..self.nb_subfr]);
             per_index = g.periodicity_index;
@@ -283,14 +296,17 @@ impl SilkChannelEncoder {
         // blocks → NLSF → VQ-quantised indices (requantised NLSF written back),
         // then the Q12 LPC the decoder rebuilds.
         let mut lpc = [0.0f32; MAX_LPC_ORDER];
-        burg_modified(
-            &mut lpc[..order],
-            &lpc_in_pre,
-            min_inv_gain,
-            shift,
-            self.nb_subfr,
-            order,
-        );
+        {
+            let _g = crate::prof::scope("silk:burg");
+            burg_modified(
+                &mut lpc[..order],
+                &lpc_in_pre,
+                min_inv_gain,
+                shift,
+                self.nb_subfr,
+                order,
+            );
+        }
 
         let cb = nlsf_codebook(self.fs_khz);
         let mut nlsf_q15: Vec<i16> = a2nlsf(&lpc[..order]);
@@ -447,6 +463,7 @@ impl SilkChannelEncoder {
                 gains_indices = gi;
             }
 
+            let _nsq_g = crate::prof::scope("silk:nsq");
             nsq(
                 &mut self.nsq,
                 &cfg,
@@ -467,6 +484,7 @@ impl SilkChannelEncoder {
                 lambda_q10,
                 ltp_scale_q14,
             );
+            drop(_nsq_g);
             indices.gains_indices[..self.nb_subfr].copy_from_slice(&gains_indices[..self.nb_subfr]);
             indices.quant_offset_type = quant_offset_type as i8;
             encode_indices(

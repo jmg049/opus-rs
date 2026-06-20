@@ -37,11 +37,7 @@ pub(crate) fn autocorrelation(results: &mut [f32], input: &[f32], count: usize) 
     let n = input.len();
     let count = count.min(n);
     for (i, r) in results.iter_mut().enumerate().take(count) {
-        let mut acc = 0.0f64;
-        for j in 0..n - i {
-            acc += f64::from(input[j]) * f64::from(input[j + i]);
-        }
-        *r = acc as f32;
+        *r = crate::simd::dot_f64(&input[..n - i], &input[i..]) as f32;
     }
 }
 
@@ -92,18 +88,23 @@ pub(crate) fn bwexpander(ar: &mut [f32], order: usize, chirp: f32) {
 
 /// `silk_energy_FLP`: sum of squares in double precision.
 pub(crate) fn energy(data: &[f32]) -> f64 {
-    data.iter().map(|&v| f64::from(v) * f64::from(v)).sum()
+    crate::simd::dot_f64(data, data)
 }
 
 /// `silk_LPC_analysis_filter_FLP`: the LPC prediction residual of `s`
 /// (`r[ix] = s[ix] - Σ_j s[ix-1-j]·a[j]`), with the first `order` outputs
 /// set to zero (the filter starts from zero state).
 pub(crate) fn lpc_analysis_filter_flp(r: &mut [f32], a: &[f32], s: &[f32], length: usize, order: usize) {
+    // `pred = Σ_j s[ix-1-j]·a[j]` reads the history backwards; reversing the
+    // (short) coefficient vector once turns it into a forward contiguous dot
+    // `Σ_k s[ix-order+k]·a_rev[k]` the SIMD kernel can vectorise.
+    let mut a_rev = [0.0f32; MAX_ORDER];
+    for j in 0..order {
+        a_rev[order - 1 - j] = a[j];
+    }
+    let a_rev = &a_rev[..order];
     for ix in order..length {
-        let mut pred = 0.0f32;
-        for (j, &aj) in a.iter().enumerate().take(order) {
-            pred += s[ix - 1 - j] * aj;
-        }
+        let pred = crate::simd::dot(a_rev, &s[ix - order..ix]);
         r[ix] = s[ix] - pred;
     }
     for v in r.iter_mut().take(order) {

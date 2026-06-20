@@ -54,11 +54,11 @@ const LAG_RANGE_STAGE3_10MS: [[i8; 2]; 2] = [[-3, 7], [-2, 7]];
 const NB_CBK_SEARCHS_STAGE3: [usize; 3] = [16, 24, 34];
 
 fn energy(x: &[f32]) -> f64 {
-    x.iter().map(|&v| f64::from(v) * f64::from(v)).sum()
+    crate::simd::dot_f64(x, x)
 }
 
 fn inner(a: &[f32], b: &[f32], n: usize) -> f64 {
-    (0..n).map(|i| f64::from(a[i]) * f64::from(b[i])).sum()
+    crate::simd::dot_f64(&a[..n], b)
 }
 
 /// `celt_pitch_xcorr`: `out[i] = <x, y[i..]>` for `i` in `0..max`.
