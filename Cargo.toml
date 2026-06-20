@@ -36,6 +36,12 @@ spectrograms = ["std", "dep:spectrograms"]
 spectrograms = { version = "1.4", path = "../../rust/spectrograms", optional = true, default-features = false, features = ["realfft"] }
 
 [dev-dependencies]
+# libopus via FFI (links the system libopus), for the comparison benchmark only.
+opus = "0.3"
+
+[[bench]]
+name = "vs_libopus"
+harness = false
 
 [[example]]
 name = "decode_throughput"

@@ -70,6 +70,40 @@ official conformance vectors):
 Reproduce with
 `cargo run --release --example decode_throughput tests/vectors/testvector01.bit`.
 
+### vs libopus
+
+Measured in-process against **libopus 1.6.1** (the C reference, SIMD-enabled,
+via its `opus` Rust FFI binding) on the same data - `cargo bench --bench
+vs_libopus --features std` (needs a system libopus; a dev-dependency only).
+This is pure scalar Rust against hand-optimised SIMD C. There is no other
+complete pure-Rust Opus codec to compare against; the FFI binding *is*
+libopus, so binding ≈ native C.
+
+**Decode** (× realtime, one core; ratio = how many times faster than libopus):
+
+| Mode | `opus_native` | libopus 1.6 | speedup |
+|------|---------------|-------------|---------|
+| SILK wideband 16 kb/s | **2070×** | 1160× | **1.8× faster** |
+| hybrid fullband 32 kb/s | **1180×** | 800× | **1.5× faster** |
+| CELT fullband 64 kb/s | 1100× | 1470× | 0.75× |
+
+We decode speech (SILK/hybrid) faster than SIMD libopus; CELT (MDCT-heavy) is
+the one mode where libopus's SIMD wins.
+
+**Encode** (× realtime). libopus has a complexity knob (0-10); `opus_native`
+sits around complexity 0, so c0 is the fair algorithmic comparison and c10 is
+libopus's default (what callers usually get):
+
+| Mode | `opus_native` | libopus c0 | libopus c10 (default) |
+|------|---------------|------------|-----------------------|
+| SILK wideband 16 kb/s | 385× | 725× | 215× |
+| hybrid fullband 32 kb/s | 200× | 560× | 190× |
+| CELT fullband 64 kb/s | 305× | 1080× | 430× |
+
+At matched complexity libopus's encoder is ~2-3.5× faster (SIMD + years of
+tuning); against its default complexity we are faster on speech and comparable
+on hybrid. Every mode encodes and decodes at hundreds of × realtime.
+
 ## Conformance
 
 The decoder **passes the official conformance criterion**: every one of
