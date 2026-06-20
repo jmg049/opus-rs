@@ -147,12 +147,21 @@ pub fn alg_unquant(
     debug_assert!(k > 0, "alg_unquant() needs at least one pulse");
     debug_assert!(x.len() > 1, "alg_unquant() needs at least two dimensions");
 
-    let mut iy = vec![0i32; x.len()];
-    decode_pulses(dec, &mut iy, k)?;
-    let ryy: f32 = iy.iter().map(|&v| (v * v) as f32).sum();
-    normalise_residual(&iy, x, ryy, gain);
-    exp_rotation(x, -1, b, k, spread);
-    Some(extract_collapse_mask(&iy, b))
+    // Reuse a thread-local pulse buffer rather than allocating per band - band
+    // decode runs dozens of times per frame.
+    thread_local! {
+        static IY: core::cell::RefCell<alloc::vec::Vec<i32>> =
+            const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+    }
+    IY.with_borrow_mut(|iy| {
+        iy.clear();
+        iy.resize(x.len(), 0);
+        decode_pulses(dec, iy, k)?;
+        let ryy: f32 = iy.iter().map(|&v| (v * v) as f32).sum();
+        normalise_residual(iy, x, ryy, gain);
+        exp_rotation(x, -1, b, k, spread);
+        Some(extract_collapse_mask(iy, b))
+    })
 }
 
 /// Renormalises `x` to norm `gain` (`renormalise_vector`); used for folded
