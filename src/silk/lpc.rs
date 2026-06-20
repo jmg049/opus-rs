@@ -158,12 +158,21 @@ pub(crate) fn lpc_inverse_pred_gain(a_q12: &[i16]) -> i32 {
 pub(crate) fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i16]) {
     use super::math::{rshift_round, smlabb};
     let d = b.len();
-    debug_assert!(d >= 6 && d & 1 == 0 && d <= input.len());
+    debug_assert!(d >= 6 && d & 1 == 0 && d <= input.len() && d <= 16);
     debug_assert_eq!(out.len(), input.len());
+    // Reverse the taps once so the per-sample prediction is a forward windowed
+    // dot (`input[ix-d..ix]` zipped with `b_rev`) with no bounds checks. Integer
+    // wrapping accumulation is order-independent, so this stays bit-identical.
+    let mut b_rev = [0i16; 16];
+    for (j, &tap) in b.iter().enumerate() {
+        b_rev[d - 1 - j] = tap;
+    }
+    let b_rev = &b_rev[..d];
     for ix in d..input.len() {
+        let win = &input[ix - d..ix];
         let mut out32_q12 = 0i32;
-        for (j, &tap) in b.iter().enumerate() {
-            out32_q12 = smlabb(out32_q12, i32::from(input[ix - 1 - j]), i32::from(tap));
+        for (&w, &tap) in win.iter().zip(b_rev.iter()) {
+            out32_q12 = smlabb(out32_q12, i32::from(w), i32::from(tap));
         }
         // Subtract the prediction from the input (wrapping), scale to Q0.
         let out32_q12 = (i32::from(input[ix]) << 12).wrapping_sub(out32_q12);

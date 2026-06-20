@@ -150,7 +150,10 @@ impl EncDownsampler {
         for (m, o) in out.iter_mut().enumerate() {
             let base = m * self.decim;
             let acc = crate::simd::dot(coef, &buf[base..base + ORD]);
-            *o = (acc * (1.0 / 16384.0)).round().clamp(-32768.0, 32767.0) as i16;
+            // Round half away from zero without libm: `+ copysign(0.5)` then the
+            // saturating `as i16` cast (which also clamps to ±32767).
+            let v = acc * (1.0 / 16384.0);
+            *o = (v + 0.5f32.copysign(v)) as i16;
         }
 
         // Save the FIR history (the last ORD samples of the work buffer).
