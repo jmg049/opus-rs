@@ -28,6 +28,19 @@ pub(super) fn op_pvq_search(x: &[f32], iy: &mut [i32], k: usize) -> f32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+std::thread_local! {
+    /// Reused work buffers for the pulse search (`xs`, `y`, `signy`, `iy`),
+    /// sized to the band's padded width. The search runs ~once per band per
+    /// frame, so reusing these avoids four heap allocations (and their zeroing)
+    /// on every call. They are re-initialised each call (sentinels in the
+    /// padding, cleared `y`/`iy`), so no state carries between calls.
+    static PVQ_XS: core::cell::RefCell<alloc::vec::Vec<f32>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+    static PVQ_Y: core::cell::RefCell<alloc::vec::Vec<f32>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+    static PVQ_SIGNY: core::cell::RefCell<alloc::vec::Vec<f32>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+    static PVQ_IY: core::cell::RefCell<alloc::vec::Vec<i32>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+}
+
 /// AVX2 port of [`op_pvq_search_sse2`]: identical algorithm, 8 lanes wide, using
 /// the native 32-bit integer max (`_mm256_max_epi32`) for index tracking. The
 /// chosen pulse vector is still a valid PVQ codeword (only the per-pulse argmax
@@ -40,11 +53,16 @@ unsafe fn op_pvq_search_avx2(input: &[f32], iy_out: &mut [i32], k: usize) -> f32
 
     let n = input.len();
     let cap = (n + 7).next_multiple_of(8);
-    let mut xs = alloc::vec![0.0f32; cap];
-    let mut y = alloc::vec![0.0f32; cap];
-    let mut signy = alloc::vec![0.0f32; cap];
-    let mut iy = alloc::vec![0i32; cap];
+    let mut xs = PVQ_XS.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    let mut y = PVQ_Y.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    let mut signy = PVQ_SIGNY.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    let mut iy = PVQ_IY.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    xs.resize(cap, 0.0);
+    y.resize(cap, 0.0);
+    signy.resize(cap, 0.0);
+    iy.resize(cap, 0);
     xs[..n].copy_from_slice(input);
+    xs[n..cap].fill(0.0);
 
     // Broadcast the horizontal max of an 8-lane vector to all lanes.
     #[allow(unsafe_code)]
@@ -199,6 +217,10 @@ unsafe fn op_pvq_search_avx2(input: &[f32], iy_out: &mut [i32], k: usize) -> f32
         }
 
         iy_out.copy_from_slice(&iy[..n]);
+        PVQ_XS.with(|s| *s.borrow_mut() = core::mem::take(&mut xs));
+        PVQ_Y.with(|s| *s.borrow_mut() = core::mem::take(&mut y));
+        PVQ_SIGNY.with(|s| *s.borrow_mut() = core::mem::take(&mut signy));
+        PVQ_IY.with(|s| *s.borrow_mut() = core::mem::take(&mut iy));
         yy
     }
 }
@@ -210,11 +232,16 @@ unsafe fn op_pvq_search_sse2(input: &[f32], iy_out: &mut [i32], k: usize) -> f32
 
     let n = input.len();
     let cap = (n + 3).next_multiple_of(4);
-    let mut xs = alloc::vec![0.0f32; cap];
-    let mut y = alloc::vec![0.0f32; cap];
-    let mut signy = alloc::vec![0.0f32; cap];
-    let mut iy = alloc::vec![0i32; cap];
+    let mut xs = PVQ_XS.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    let mut y = PVQ_Y.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    let mut signy = PVQ_SIGNY.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    let mut iy = PVQ_IY.with(|s| core::mem::take(&mut *s.borrow_mut()));
+    xs.resize(cap, 0.0);
+    y.resize(cap, 0.0);
+    signy.resize(cap, 0.0);
+    iy.resize(cap, 0);
     xs[..n].copy_from_slice(input);
+    xs[n..cap].fill(0.0);
 
     // SAFETY: see the wrapper; all indices below are < `cap` and 16-byte SIMD
     // ops read/write 4 lanes starting at `j < n ≤ cap - 3`.
@@ -342,6 +369,10 @@ unsafe fn op_pvq_search_sse2(input: &[f32], iy_out: &mut [i32], k: usize) -> f32
         }
 
         iy_out.copy_from_slice(&iy[..n]);
+        PVQ_XS.with(|s| *s.borrow_mut() = core::mem::take(&mut xs));
+        PVQ_Y.with(|s| *s.borrow_mut() = core::mem::take(&mut y));
+        PVQ_SIGNY.with(|s| *s.borrow_mut() = core::mem::take(&mut signy));
+        PVQ_IY.with(|s| *s.borrow_mut() = core::mem::take(&mut iy));
         yy
     }
 }
