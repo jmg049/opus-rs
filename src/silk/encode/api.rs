@@ -44,20 +44,31 @@ impl SilkEncoder {
         self.ch.set_bitrate(bps);
     }
 
-    /// Encodes `input` to a SILK payload of at most `max_payload` bytes,
-    /// lowering the coding SNR (bitrate) and re-encoding from a snapshot if
-    /// the first attempt overshoots - a coarse closed-loop rate control.
-    /// Returns `None` if even the minimum bitrate cannot fit. The encoder
-    /// state advances exactly once (the accepted attempt).
+    /// Encodes `input` to a SILK payload of at most `max_payload` bytes. Each
+    /// attempt applies the per-frame hard bit cap (the gain-multiplier rate
+    /// control), which scales the gains coarser until the frame fits; if the
+    /// cap's gain ceiling is not enough, the coding SNR (bitrate) is lowered
+    /// and the encode retried from a snapshot. Returns `None` if even the
+    /// minimum bitrate cannot fit. The encoder state advances exactly once.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input` is not a whole number of frames.
     pub fn encode_capped(&mut self, input: &[i16], max_payload: usize) -> Option<Vec<u8>> {
+        let max_bits = (max_payload * 8) as i32;
         let snapshot = self.clone();
         let mut bps = self.ch.target_rate_bps;
         for _ in 0..6 {
-            let bytes = self.encode(input);
-            if bytes.len() <= max_payload {
-                return Some(bytes);
+            let mut enc = RangeEncoder::new(1275);
+            self.encode_into(&mut enc, input, Some(max_bits));
+            let bits = (enc.tell_frac() as usize + 7) >> 3;
+            let nbytes = bits.div_ceil(8).max(2);
+            if nbytes <= max_payload {
+                self.final_range = enc.range_size();
+                enc.shrink(nbytes);
+                return Some(enc.finalize().expect("capped SILK packet fits the range coder"));
             }
-            // Overshot: restore the pre-encode state and try a lower rate.
+            // The hard cap's gain ceiling was not enough; lower the rate and retry.
             if bps <= 6_000 {
                 return None;
             }

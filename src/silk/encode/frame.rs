@@ -34,6 +34,7 @@ use super::super::params::LTP_ORDER;
 use super::super::pulses::encode_pulses;
 use super::super::tables::LTPSCALES_TABLE_Q14;
 use super::control::control_snr;
+use super::dsp::{energy, lpc_analysis_filter_flp};
 use super::gains::process_gains;
 use super::lpc::burg_modified;
 use super::ltp::{find_ltp, quant_ltp_gains};
@@ -66,6 +67,9 @@ pub(crate) struct SilkChannelEncoder {
     pub vad: VadState,
     /// Target bitrate (bps), mapped to the coding SNR per frame.
     pub target_rate_bps: i32,
+    /// True until the first frame after a reset has been coded; relaxes the
+    /// maximum-prediction-gain cap (`first_frame_after_reset`).
+    pub first_frame_after_reset: bool,
     /// Entropy-coding history for [`encode_indices`].
     pub ec_prev: EcPrevState,
     pub fs_khz: i32,
@@ -87,6 +91,7 @@ impl SilkChannelEncoder {
             prev_input: vec![0; 20 * fs_khz as usize],
             vad: VadState::new(),
             target_rate_bps: 30_000,
+            first_frame_after_reset: true,
             ec_prev: EcPrevState::default(),
             fs_khz,
             nb_subfr,
@@ -109,6 +114,7 @@ impl SilkChannelEncoder {
         self.prev_lag = 0;
         self.prev_signal_type = TYPE_UNVOICED;
         self.ltp_corr = 0.0;
+        self.first_frame_after_reset = true;
         for v in &mut self.prev_input {
             *v = 0;
         }
@@ -169,52 +175,10 @@ impl SilkChannelEncoder {
         // The whitened residual aligned to the frame (`res_pitch_frame`).
         let res_f: Vec<f32> = res[ltp_mem_length..ltp_mem_length + frame_length].to_vec();
 
-        // Short-term analysis: Burg LPC over the frame → NLSF → VQ-quantised
-        // indices (with the requantised NLSF written back), then the Q12 LPC
-        // the decoder rebuilds.
-        let x_f: Vec<f32> = input.iter().map(|&v| f32::from(v)).collect();
-        let mut lpc = [0.0f32; MAX_LPC_ORDER];
-        burg_modified(&mut lpc[..order], &x_f, 1.0 / 1e4, frame_length, 1, order);
-
-        let cb = nlsf_codebook(self.fs_khz);
-        let mut nlsf_q15: Vec<i16> = a2nlsf(&lpc[..order]);
-        let mut w_q2 = [0i16; MAX_LPC_ORDER];
-        nlsf_vq_weights_laroia(&mut w_q2[..order], &nlsf_q15, order);
-        let (nlsf_indices, _) = nlsf_encode(&mut nlsf_q15, cb, &w_q2[..order], 1 << 14, 4, signal_type as usize);
-
-        let mut pred_coef = [0i16; 2 * MAX_LPC_ORDER];
-        let mut a_q12 = [0i16; MAX_LPC_ORDER];
-        nlsf2a(&mut a_q12[..order], &nlsf_q15[..order]);
-        pred_coef[..order].copy_from_slice(&a_q12[..order]);
-        pred_coef[MAX_LPC_ORDER..MAX_LPC_ORDER + order].copy_from_slice(&a_q12[..order]);
-
-        // Long-term prediction: correlation + gain VQ (voiced only), on the
-        // whitened residual with its real `ltp_mem_length` of history.
-        let mut ltp_coef = [0i16; LTP_ORDER * MAX_NB_SUBFR];
-        let mut ltp_index = [0i8; MAX_NB_SUBFR];
-        let mut per_index = 0i8;
-        let mut pred_gain_db = 0.0f32;
-        if is_voiced {
-            let mut xx = vec![0.0f32; self.nb_subfr * LTP_ORDER * LTP_ORDER];
-            let mut x_x = vec![0.0f32; self.nb_subfr * LTP_ORDER];
-            find_ltp(
-                &res,
-                ltp_mem_length,
-                &pitch_l,
-                subfr_length,
-                self.nb_subfr,
-                &mut xx,
-                &mut x_x,
-            );
-            let g = quant_ltp_gains(&xx, &x_x, subfr_length as i32, self.nb_subfr, &mut self.sum_log_gain_q7);
-            ltp_coef = g.b_q14;
-            ltp_index[..self.nb_subfr].copy_from_slice(&g.cbk_index[..self.nb_subfr]);
-            per_index = g.periodicity_index;
-            pred_gain_db = g.pred_gain_db;
-        }
-
         // Noise-shaping analysis (complexity-0 configuration: no warping, so
-        // the plain NSQ sees ordinary shaping coefficients).
+        // the plain NSQ sees ordinary shaping coefficients). The reference runs
+        // this before `find_pred_coefs` because it produces the per-subframe
+        // gains the prediction analysis normalises by.
         let la_shape = 3 * self.fs_khz as usize;
         let shaping_lpc_order = 12.min(order);
         let snr_db_q7 = control_snr(self.fs_khz, self.nb_subfr, self.target_rate_bps);
@@ -241,27 +205,115 @@ impl SilkChannelEncoder {
         };
         let shp = noise_shape_analysis(&mut self.shape, &shape_cfg, &res_f, &x_buf);
 
-        // Residual energy on the gain-normalised signal (`silk_residual_
-        // energy_FLP`): ResNrg[k] = Gains[k]^2 * energy(LPC residual of x/Gain).
-        let a_f: Vec<f32> = a_q12[..order].iter().map(|&c| f32::from(c) / 4096.0).collect();
-        let mut x_hist = vec![0.0f32; order + frame_length];
-        for (i, &v) in input.iter().enumerate() {
-            x_hist[order + i] = f32::from(v);
+        // `silk_find_pred_coefs_FLP`: short- and long-term prediction analysis
+        // on the gain-normalised input. `LPC_in_pre` holds, per subframe,
+        // `order` history samples plus the subframe scaled by the inverse gain
+        // (and, when voiced, whitened by the LTP first); the short-term LPC is
+        // estimated from that signal rather than the raw frame.
+        let mut inv_gains = [0.0f32; MAX_NB_SUBFR];
+        for (k, ig) in inv_gains.iter_mut().enumerate().take(self.nb_subfr) {
+            *ig = 1.0 / shp.gains[k];
         }
+        let pre = order; // preceding samples per subframe (predictLPCOrder)
+        let shift = subfr_length + pre;
+        let mut lpc_in_pre = vec![0.0f32; self.nb_subfr * shift];
+
+        let mut ltp_coef = [0i16; LTP_ORDER * MAX_NB_SUBFR];
+        let mut ltp_index = [0i8; MAX_NB_SUBFR];
+        let mut per_index = 0i8;
+        let mut pred_gain_db = 0.0f32;
+        if is_voiced {
+            // LTP correlation + gain VQ on the whitened residual.
+            let mut xx = vec![0.0f32; self.nb_subfr * LTP_ORDER * LTP_ORDER];
+            let mut x_x = vec![0.0f32; self.nb_subfr * LTP_ORDER];
+            find_ltp(
+                &res,
+                ltp_mem_length,
+                &pitch_l,
+                subfr_length,
+                self.nb_subfr,
+                &mut xx,
+                &mut x_x,
+            );
+            let g = quant_ltp_gains(&xx, &x_x, subfr_length as i32, self.nb_subfr, &mut self.sum_log_gain_q7);
+            ltp_coef = g.b_q14;
+            ltp_index[..self.nb_subfr].copy_from_slice(&g.cbk_index[..self.nb_subfr]);
+            per_index = g.periodicity_index;
+            pred_gain_db = g.pred_gain_db;
+
+            // LTP analysis filter: subtract the long-term prediction (lagged by
+            // `pitch_l[k]`, taps centred at `LTP_ORDER/2`) and scale by the
+            // inverse gain. `pitch_x_buf` holds the raw input with history.
+            for k in 0..self.nb_subfr {
+                let x_ptr = ltp_mem_length + k * subfr_length - pre;
+                let inv = inv_gains[k];
+                let btmp = &ltp_coef[k * LTP_ORDER..k * LTP_ORDER + LTP_ORDER];
+                for i in 0..shift {
+                    let xi = x_ptr + i;
+                    let lag = xi - pitch_l[k] as usize;
+                    let mut v = pitch_x_buf[xi];
+                    for (j, &b) in btmp.iter().enumerate() {
+                        v -= (f32::from(b) / 16384.0) * pitch_x_buf[lag + LTP_ORDER / 2 - j];
+                    }
+                    lpc_in_pre[k * shift + i] = v * inv;
+                }
+            }
+        } else {
+            // Unvoiced: gain-normalised input with `pre` history samples.
+            for k in 0..self.nb_subfr {
+                let x_ptr = ltp_mem_length + k * subfr_length - pre;
+                let inv = inv_gains[k];
+                for i in 0..shift {
+                    lpc_in_pre[k * shift + i] = pitch_x_buf[x_ptr + i] * inv;
+                }
+            }
+        }
+
+        // Maximum prediction-gain cap (`minInvGain`): looser right after a
+        // reset, otherwise scaled by the LTP coding gain and the coding quality
+        // so a strong long-term predictor permits a sharper LPC.
+        let min_inv_gain = if self.first_frame_after_reset {
+            1.0 / 100.0 // 1 / MAX_PREDICTION_POWER_GAIN_AFTER_RESET
+        } else {
+            let g = 2.0f32.powf(pred_gain_db / 3.0) / 1e4; // / MAX_PREDICTION_POWER_GAIN
+            g / (0.25 + 0.75 * shp.coding_quality)
+        };
+
+        // Short-term analysis: Burg LPC over the per-subframe `LPC_in_pre`
+        // blocks → NLSF → VQ-quantised indices (requantised NLSF written back),
+        // then the Q12 LPC the decoder rebuilds.
+        let mut lpc = [0.0f32; MAX_LPC_ORDER];
+        burg_modified(
+            &mut lpc[..order],
+            &lpc_in_pre,
+            min_inv_gain,
+            shift,
+            self.nb_subfr,
+            order,
+        );
+
+        let cb = nlsf_codebook(self.fs_khz);
+        let mut nlsf_q15: Vec<i16> = a2nlsf(&lpc[..order]);
+        let mut w_q2 = [0i16; MAX_LPC_ORDER];
+        nlsf_vq_weights_laroia(&mut w_q2[..order], &nlsf_q15, order);
+        let (nlsf_indices, _) = nlsf_encode(&mut nlsf_q15, cb, &w_q2[..order], 1 << 14, 4, signal_type as usize);
+
+        let mut pred_coef = [0i16; 2 * MAX_LPC_ORDER];
+        let mut a_q12 = [0i16; MAX_LPC_ORDER];
+        nlsf2a(&mut a_q12[..order], &nlsf_q15[..order]);
+        pred_coef[..order].copy_from_slice(&a_q12[..order]);
+        pred_coef[MAX_LPC_ORDER..MAX_LPC_ORDER + order].copy_from_slice(&a_q12[..order]);
+
+        // Residual energy on `LPC_in_pre` with the quantised LPC
+        // (`silk_residual_energy_FLP`): ResNrg[k] = Gains[k]^2 · energy(residual).
+        let a_f: Vec<f32> = a_q12[..order].iter().map(|&c| f32::from(c) / 4096.0).collect();
         let mut gains = shp.gains;
         let mut res_nrg = [0.0f32; MAX_NB_SUBFR];
+        let mut lpc_res = vec![0.0f32; shift];
         for k in 0..self.nb_subfr {
-            let inv_gain = 1.0 / gains[k];
-            let base = k * subfr_length;
-            let mut nrg = 0.0f64;
-            for n in 0..subfr_length {
-                let p = base + order + n;
-                let mut acc = x_hist[p] * inv_gain;
-                for (j, &aj) in a_f.iter().enumerate() {
-                    acc -= aj * x_hist[p - 1 - j] * inv_gain;
-                }
-                nrg += f64::from(acc) * f64::from(acc);
-            }
+            let sub = &lpc_in_pre[k * shift..k * shift + shift];
+            lpc_analysis_filter_flp(&mut lpc_res, &a_f, sub, shift, order);
+            let nrg = energy(&lpc_res[order..shift]);
             res_nrg[k] = (f64::from(gains[k]) * f64::from(gains[k]) * nrg) as f32;
         }
 
@@ -326,6 +378,7 @@ impl SilkChannelEncoder {
         // Carry forward the pitch/voicing state and input history.
         self.prev_lag = if is_voiced { pitch_l[self.nb_subfr - 1] } else { 0 };
         self.prev_signal_type = signal_type;
+        self.first_frame_after_reset = false;
         if frame_length >= ltp_mem_length {
             self.prev_input.copy_from_slice(&input[frame_length - ltp_mem_length..]);
         } else {

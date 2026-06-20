@@ -37,14 +37,17 @@ Differences from the reference (`silk_encode_frame_FLP`):
   (`(bands)*3 + 3`), tuned by hand on one speech clip. A rate-aware split
   would be better.
 
-## SILK LPC analysis (`find_pred_coefs`)
+## `encode_ogg_opus` pre-skip vs mode
 
-Not yet matched to the reference - `encode_frame` runs Burg on the raw frame,
-not on the gain-normalised, LTP-pre-whitened `LPC_in_pre`. A faithful port
-regressed on synthetic tones; it must be gated on the real-speech quality
-harness (`examples/encoder_quality.rs`), which is the only trustworthy oracle
-since the encoder is not bit-exact-defined. See the memory note
-`opus-find-pred-coefs` for the full analysis.
+`pre_skip` is fixed at 120 (the CELT reconstruction delay), but hybrid/SILK
+have a smaller delay (~69 in libopus). So a hybrid/SILK file decodes ~51
+samples (~1 ms) misaligned in a *third-party* decoder (ffmpeg still reports
+0.97 correlation; our own decoder round-trips consistently because it uses the
+same pre_skip). To make cross-decoder alignment exact, set `pre_skip` from the
+mode `encode_auto` will pick for the chosen bitrate (≤ 40 kb/s fullband →
+hybrid → ~69; else CELT → 120), or flush the encoder delay explicitly. Note
+our decoder's measured hybrid delay (120) differs from libopus's (~69) - worth
+confirming our decoder's hybrid delay is conformant.
 
 ## Other
 
