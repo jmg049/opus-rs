@@ -602,9 +602,10 @@ impl OpusEncoder {
 /// [`decode_ogg_opus`](crate::decode_ogg_opus) - together they let the codec
 /// read and write standard `.opus` files.
 ///
-/// `pre_skip` is fixed at 120 samples, the CELT/hybrid reconstruction delay at
-/// 48 kHz that fullband `encode_auto` always incurs, so the decoder trims the
-/// warm-up and the output aligns with the input.
+/// `pre_skip` matches the reconstruction delay of the mode fullband
+/// `encode_auto` selects for `bitrate` - 120 samples for CELT (> 40 kb/s),
+/// 69 for hybrid (≤ 40 kb/s) - so the decoder trims the warm-up and the output
+/// aligns with the input (verified at zero lag against ffmpeg/libopus).
 ///
 /// # Panics
 ///
@@ -617,9 +618,11 @@ pub fn encode_ogg_opus(pcm: &[f32], channels: usize, bitrate: u32) -> Vec<u8> {
     assert!(pcm.len() % channels == 0, "pcm length must be a whole number of frames");
 
     const FRAME: usize = 960; // 20 ms at 48 kHz
-    const PRE_SKIP: u16 = 120; // CELT/hybrid reconstruction delay (samples @ 48 kHz)
+    // Fullband encode_auto picks hybrid at ≤ 40 kb/s (SILK delay, 69) and CELT
+    // above (MDCT overlap, 120).
+    let pre_skip: u16 = if bitrate > 40_000 { 120 } else { 69 };
 
-    let head = OpusHead::family0(channels as u8, PRE_SKIP, 48_000);
+    let head = OpusHead::family0(channels as u8, pre_skip, 48_000);
     let tags = OpusTags {
         vendor: b"opus_native".to_vec(),
         comments: Vec::new(),
@@ -716,42 +719,48 @@ mod tests {
     /// with the input (delay-aligned by the 120-sample pre-skip).
     #[test]
     fn ogg_opus_file_round_trips() {
-        for &channels in &[1usize, 2] {
-            // ~0.5 s of a tone, a whole number of 20 ms frames.
-            let per_ch = 960 * 25;
-            let mut pcm = Vec::with_capacity(per_ch * channels);
-            for i in 0..per_ch {
-                let t = i as f32 / 48_000.0;
-                let s = 0.4 * (2.0 * core::f32::consts::PI * 440.0 * t).sin();
-                for _ in 0..channels {
-                    pcm.push(s);
+        // (bitrate, expected pre_skip) - CELT above 40 kb/s, hybrid below.
+        for &(bitrate, want_pre_skip) in &[(64_000u32, 120u16), (32_000, 69)] {
+            for &channels in &[1usize, 2] {
+                // ~0.5 s of a tone, a whole number of 20 ms frames.
+                let per_ch = 960 * 25;
+                let mut pcm = Vec::with_capacity(per_ch * channels);
+                for i in 0..per_ch {
+                    let t = i as f32 / 48_000.0;
+                    let s = 0.4 * (2.0 * core::f32::consts::PI * 440.0 * t).sin();
+                    for _ in 0..channels {
+                        pcm.push(s);
+                    }
                 }
+
+                let file = encode_ogg_opus(&pcm, channels, bitrate);
+                let (out, head) = decode_ogg_opus(&file).expect("decode the encoded file");
+                assert_eq!(usize::from(head.channel_count), channels);
+                assert_eq!(head.pre_skip, want_pre_skip, "br={bitrate}");
+
+                // Output covers the input minus at most the codec tail delay.
+                let out_per_ch = out.len() / channels;
+                assert!(
+                    out_per_ch >= per_ch - 960 && out_per_ch <= per_ch + 960,
+                    "br={bitrate} ch={channels}: decoded {out_per_ch} samples/ch vs input {per_ch}"
+                );
+
+                // Correlation on the first channel (input vs delay-aligned output).
+                let n = out_per_ch.min(per_ch) - 480;
+                let (mut sig, mut dot, mut energy) = (0.0f64, 0.0f64, 0.0f64);
+                for i in 0..n {
+                    let a = f64::from(pcm[(480 + i) * channels]);
+                    let b = f64::from(out[(480 + i) * channels]);
+                    sig += a * a;
+                    dot += a * b;
+                    energy += b * b;
+                }
+                let corr = dot / (sig.sqrt() * energy.sqrt()).max(1e-9);
+                assert!(
+                    corr > 0.9,
+                    "br={bitrate} ch={channels}: round-trip correlation {corr:.3} too low"
+                );
             }
-
-            let file = encode_ogg_opus(&pcm, channels, 64_000);
-            let (out, head) = decode_ogg_opus(&file).expect("decode the encoded file");
-            assert_eq!(usize::from(head.channel_count), channels);
-            assert_eq!(head.pre_skip, 120);
-
-            // Output covers the input minus at most the codec tail delay.
-            let out_per_ch = out.len() / channels;
-            assert!(
-                out_per_ch >= per_ch - 960 && out_per_ch <= per_ch + 960,
-                "ch={channels}: decoded {out_per_ch} samples/ch vs input {per_ch}"
-            );
-
-            // Correlation on the first channel (input vs delay-aligned output).
-            let n = out_per_ch.min(per_ch) - 480;
-            let (mut sig, mut dot, mut energy) = (0.0f64, 0.0f64, 0.0f64);
-            for i in 0..n {
-                let a = f64::from(pcm[(480 + i) * channels]);
-                let b = f64::from(out[(480 + i) * channels]);
-                sig += a * a;
-                dot += a * b;
-                energy += b * b;
-            }
-            let corr = dot / (sig.sqrt() * energy.sqrt()).max(1e-9);
-            assert!(corr > 0.9, "ch={channels}: round-trip correlation {corr:.3} too low");
         }
     }
 
