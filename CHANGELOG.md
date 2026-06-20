@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- CELT encode is now faster than libopus at its default complexity (fullband 64 kb/s ~590× vs ~400× realtime, up from ~305×): the pitch-analysis correlations that dominate the CELT pre-filter (`celt_pitch_xcorr` and the doubling search - ~two-thirds of CELT encode) now run through SIMD dot products (AVX2+FMA with runtime detection, SSE2 baseline, scalar fallback off x86-64). The pitch values feed encoder decisions only, which the reference float build does not require to be bit-exact
 - CELT encode is ~15-20% faster (fullband 64 kb/s ~305×→~355× realtime) from an SSE2 port of the PVQ pulse search (`op_pvq_search`, the O(K·N) band-encode hot loop). The crate now permits `unsafe` at explicitly-annotated SIMD sites - the lint is relaxed from `forbid` to `deny`, every site carries a `// SAFETY:` justification listed in `docs/unsafe.md`. Still no FFI and no dependencies; decode conformance is unchanged (the range coder, not the encoder's pulse choice, defines the bitstream)
 - **BREAKING:** the `spectrograms` FFT backend is now a default feature - the default build decodes at ~410-730× realtime (one core) vs ~10× with the built-in evaluation; use `default-features = false` for the zero-dependency build
 

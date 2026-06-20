@@ -42,6 +42,11 @@ fn bench(label: &str, ch: usize, bw: Bandwidth, br: u32, frames: usize) {
         audio_s / secs,
         bytes as f64 * 8.0 / audio_s / 1000.0
     );
+    // With OPUS_PROF=1 set, print this mode's per-stage breakdown.
+    if std::env::var_os("OPUS_PROF").is_some() {
+        eprintln!("[{label}]");
+        opus_native::prof::dump();
+    }
 }
 
 fn main() {

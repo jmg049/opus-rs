@@ -44,6 +44,8 @@ mod encoder;
 #[cfg(feature = "std")]
 mod multistream;
 #[cfg(feature = "std")]
+pub mod prof;
+#[cfg(feature = "std")]
 pub use decoder::{OggDecodeError, OpusDecoder, decode_ogg_opus};
 #[cfg(feature = "std")]
 pub use encoder::{EncodeError, OpusEncoder, encode_ogg_opus};
@@ -59,6 +61,8 @@ pub mod ogg;
 pub mod packet;
 pub mod range;
 pub mod silk;
+#[cfg(feature = "std")]
+mod simd;
 
 pub use packet::{Bandwidth, FrameSize, Mode, Packet, PacketError, Toc};
 pub use range::{RangeDecoder, RangeEncoder, RangeEncoderError};

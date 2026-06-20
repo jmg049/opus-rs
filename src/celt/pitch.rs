@@ -27,24 +27,14 @@ pub(crate) const COMBFILTER_MAXPERIOD: usize = 1024;
 /// Shortest comb-filter period (`COMBFILTER_MINPERIOD`).
 pub(crate) const COMBFILTER_MINPERIOD: usize = 15;
 
-/// Inner product `Σ x[i]·y[i]` (`celt_inner_prod`).
+/// Inner product `Σ x[i]·y[i]` (`celt_inner_prod`), via the SIMD kernel.
 fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
-    let mut xy = 0.0f32;
-    for i in 0..n {
-        xy += x[i] * y[i];
-    }
-    xy
+    crate::simd::dot(&x[..n], y)
 }
 
 /// Two inner products sharing the first operand (`dual_inner_prod`).
 fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) {
-    let mut xy01 = 0.0f32;
-    let mut xy02 = 0.0f32;
-    for i in 0..n {
-        xy01 += x[i] * y01[i];
-        xy02 += x[i] * y02[i];
-    }
-    (xy01, xy02)
+    crate::simd::dual_dot(&x[..n], y01, y02)
 }
 
 /// Cross-correlation `xcorr[i] = Σ_j x[j]·y[i+j]` (`celt_pitch_xcorr`).

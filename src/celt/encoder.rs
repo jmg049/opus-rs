@@ -231,7 +231,10 @@ impl CeltEncoder {
         // to whiten the harmonic structure, and return the decision to code.
         // Runs before the transient analysis and MDCT, which both see the
         // filtered signal (matching the reference order).
-        let (pf_on, pitch_index, qg) = self.prefilter_analysis(&mut inputs, in_len, n, channels, nb_bytes);
+        let (pf_on, pitch_index, qg) = {
+            let _g = crate::prof::scope("celt:prefilter");
+            self.prefilter_analysis(&mut inputs, in_len, n, channels, nb_bytes)
+        };
 
         // The MDCT overlap for the next frame is the filtered tail.
         for c in 0..channels {
@@ -255,6 +258,7 @@ impl CeltEncoder {
         let mut band_e = [[0.0f32; NB_EBANDS]; 2];
         let mut band_log_e = [[0.0f32; NB_EBANDS]; 2];
         let mut band_log_e2 = [[0.0f32; NB_EBANDS]; 2];
+        let _mdct_g = crate::prof::scope("celt:mdct+bandE");
         for c in 0..channels {
             let input = &inputs[c * in_len..(c + 1) * in_len];
             let mut freq = vec![0.0f32; n];
@@ -310,23 +314,28 @@ impl CeltEncoder {
         // Dynalloc analysis (uses the previous frame's energies, so it must
         // run before coarse-energy quantisation overwrites them); yields the
         // boost targets plus the importance/spread weights for tf and spread.
-        let dyn_an = dynalloc_analysis(
-            &band_log_e,
-            &band_log_e2,
-            &self.energy.old_ebands,
-            start,
-            end,
-            channels,
-            lm,
-            nb_bytes,
-            is_transient,
-        );
+        drop(_mdct_g);
+        let dyn_an = {
+            let _g = crate::prof::scope("celt:dynalloc");
+            dynalloc_analysis(
+                &band_log_e,
+                &band_log_e2,
+                &self.energy.old_ebands,
+                start,
+                end,
+                channels,
+                lm,
+                nb_bytes,
+                is_transient,
+            )
+        };
         let boost_targets = dyn_an.offsets;
 
         // Per-band time/frequency resolution (`tf_analysis`), enabled above a
         // low byte threshold. The result is the raw 0/1 flags plus tf_select.
         let n0 = n;
         let (mut tf_res, tf_select) = if nb_bytes >= 15 * channels && lm > 0 {
+            let _g = crate::prof::scope("celt:tf_analysis");
             let lambda = 80.max(20480 / nb_bytes as i32 + 2);
             tf_analysis(
                 end,
@@ -398,7 +407,10 @@ impl CeltEncoder {
 
         // Coarse energy.
         let mut error = [[0.0f32; NB_EBANDS]; 2];
-        self.quant_coarse_energy(enc, start, end, &band_log_e, &mut error, intra, lm, total_bits);
+        {
+            let _g = crate::prof::scope("celt:coarse_energy");
+            self.quant_coarse_energy(enc, start, end, &band_log_e, &mut error, intra, lm, total_bits);
+        }
 
         // Time-frequency coding (`tf_encode`): code each band's flag as the
         // change from the previous band, code tf_select when it matters, and
@@ -441,6 +453,7 @@ impl CeltEncoder {
         // Spreading decision.
         let mut spread = Spread::Normal;
         if enc.tell() + 4 <= total_bits {
+            let _g = crate::prof::scope("celt:spreading");
             let s = spreading_decision(
                 &x,
                 n0,
@@ -587,6 +600,7 @@ impl CeltEncoder {
         // Band shapes.
         let total = ((nb_bytes * 8) << 3) as i32 - anti_collapse_rsv;
         let (xs, ys) = x.split_at_mut(n);
+        let _qb_g = crate::prof::scope("celt:quant_all_bands");
         quant_all_bands_enc(
             enc,
             start,
