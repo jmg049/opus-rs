@@ -126,23 +126,29 @@ fn main() {
     }
 
     // ---- ENCODE ----
-    println!("\nENCODE                opus_native       libopus c0        libopus c10(default)");
+    // Like-for-like: our encoder at the SAME complexity as libopus (0 and 10),
+    // so each column is a fair comparison rather than our full-quality encoder
+    // against libopus's stripped-down complexity-0 mode.
+    println!("\nENCODE             opus_native c0 / libopus c0      opus_native c10 / libopus c10");
     for &(label, bw, br, app) in &configs {
-        let mut oe = opus_native::OpusEncoder::new(1);
-        oe.set_bandwidth(our_bw(bw));
-        oe.set_bitrate(Some(br));
-        for f in &frames {
-            let _ = oe.encode_auto(f, 1275);
-        }
-        let ours = time_per_frame(nframes, || {
+        let bench_ours = |complexity: u8| -> f64 {
             let mut oe = opus_native::OpusEncoder::new(1);
             oe.set_bandwidth(our_bw(bw));
             oe.set_bitrate(Some(br));
+            oe.set_complexity(complexity);
             for f in &frames {
-                black_box(oe.encode_auto(black_box(f), 1275).unwrap());
+                let _ = oe.encode_auto(f, 1275); // warm up
             }
-        });
-
+            time_per_frame(nframes, || {
+                let mut oe = opus_native::OpusEncoder::new(1);
+                oe.set_bandwidth(our_bw(bw));
+                oe.set_bitrate(Some(br));
+                oe.set_complexity(complexity);
+                for f in &frames {
+                    black_box(oe.encode_auto(black_box(f), 1275).unwrap());
+                }
+            })
+        };
         let bench_libopus = |complexity: i32| -> f64 {
             time_per_frame(nframes, || {
                 let mut e = opus::Encoder::new(FS as u32, Channels::Mono, app).unwrap();
@@ -155,16 +161,16 @@ fn main() {
                 }
             })
         };
-        let c0 = bench_libopus(0);
-        let c10 = bench_libopus(10);
+        let (o0, l0) = (bench_ours(0), bench_libopus(0));
+        let (o10, l10) = (bench_ours(10), bench_libopus(10));
         println!(
-            "{label:<14} {:>7.0}ns {:>5.0}× {:>8.0}ns {:>5.0}× {:>8.0}ns {:>5.0}×",
-            ours,
-            xrt(ours),
-            c0,
-            xrt(c0),
-            c10,
-            xrt(c10)
+            "{label:<14} {:>5.0}× / {:>5.0}× ({:.2}×)        {:>5.0}× / {:>5.0}× ({:.2}×)",
+            xrt(o0),
+            xrt(l0),
+            l0 / o0,
+            xrt(o10),
+            xrt(l10),
+            l10 / o10,
         );
     }
 }

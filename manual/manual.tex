@@ -34,7 +34,7 @@ receiver that is not told in advance which mode each packet uses.
 \subsection{The Reference Implementation}\label{subsec:reference_impl}
 
 Throughout, the implementation under discussion is
-\texttt{opus\_native}~--- a pure-Rust, dependency-free realisation of RFC 6716.
+\texttt{opus\_native}, a pure-Rust, dependency-free realization of RFC 6716.
 Every code listing in this manual is drawn from that source. Three of its design
 choices shape the discussion:
 
@@ -43,7 +43,7 @@ choices shape the discussion:
     range coder (\cref{sec:rangecoder}), not by any one encoder's choices. The
     implementation's entropy arithmetic follows the RFC byte-for-byte, and the
     decoder is validated against the official test vectors on the
-    \emph{final-range oracle} --- a per-packet checksum of the entropy-coder
+    \emph{final-range oracle}, a per-packet checksum of the entropy-coder
     state that must agree with the reference to the bit.
   \item \textbf{Safe by default.} The crate denies \code{unsafe} everywhere
     except a handful of explicitly annotated SIMD kernels
@@ -53,7 +53,7 @@ choices shape the discussion:
   \item \textbf{Decode-first.} The decoder is the normative half of the
     specification and the half the conformance vectors exercise. The encoder is
     free to make any choice the decoder can follow; this asymmetry recurs
-    throughout the manual and is the key to several optimisations.
+    throughout the manual and is the key to several optimizations.
 \end{itemize}
 
 \subsection{Target Audience and Prerequisites}\label{subsec:prerequisites}
@@ -74,9 +74,9 @@ analysis will find the transform-coding sections (CELT) immediately familiar,
 and the linear-prediction sections (SILK) a complementary story told in the
 time domain.
 
-\subsection{Scope and Organisation}\label{subsec:organization}
+\subsection{Scope and Organization}\label{subsec:organization}
 
-The manual is organised bottom-up, from the bit to the file, mirroring the
+The manual is organized bottom-up, from the bit to the file, mirroring the
 layering of the codec itself:
 
 \begin{enumerate}[itemsep=3pt]
@@ -88,11 +88,11 @@ layering of the codec itself:
   \item \textbf{Packet Framing} (\cref{sec:packet}) --- the TOC byte, the 32
     configurations, frame packing codes 0--3, padding, and validity rules.
   \item \textbf{CELT: Transform Coding} (\cref{sec:celt}) --- the MDCT, the
-    Vorbis window and TDAC, pyramid vector quantisation, CWRS enumeration, band
+    Vorbis window and TDAC, pyramid vector quantization, CWRS enumeration, band
     splitting, energy coding, bit allocation, and the encoder's analysis.
   \item \textbf{SILK: Linear-Predictive Coding} (\cref{sec:silk}) --- linear
-    prediction, LSF/NLSF quantisation, long-term (pitch) prediction, the
-    noise-shaping quantiser, gains, the shell coder, and resampling.
+    prediction, LSF/NLSF quantization, long-term (pitch) prediction, the
+    noise-shaping quantizer, gains, the shell coder, and resampling.
   \item \textbf{The Opus Layer} (\cref{sec:opus_layer}) --- mode dispatch,
     the SILK/CELT crossover, redundancy at transitions, packet-loss
     concealment, in-band FEC, and discontinuous transmission.
@@ -101,7 +101,7 @@ layering of the codec itself:
     timing.
   \item \textbf{Multistream and Surround} (\cref{sec:multistream}) --- coupled
     and uncoupled streams, channel mapping families.
-  \item \textbf{Computational Optimisations} (\cref{sec:optimizations}) ---
+  \item \textbf{Computational Optimizations} (\cref{sec:optimizations}) ---
     SIMD dot products, the SIMD PVQ search, the MDCT pre-rotation, the FFT
     backend seam, table-driven CWRS, and buffer reuse.
   \item \textbf{Numerical Considerations and Conformance}
@@ -131,9 +131,9 @@ Throughout this manual:
 
 \section{Architecture Overview}\label{sec:architecture}
 
-This section describes the codec as a whole --- its components, the path a
-packet takes through them, and the design decisions that the rest of the manual
-elaborates --- before later sections treat each layer in detail.
+This section describes the codec as a whole: its components, the path a packet
+takes through them, and the design decisions that the rest of the manual
+elaborates. Later sections treat each layer in detail.
 
 \subsection{Two Codecs, One Bitstream}\label{subsec:two_codecs}
 
@@ -142,8 +142,8 @@ opposite coding strategies. The codec implements both and selects between them
 per frame.
 
 \begin{concept}{Speech versus Music: Two Coding Strategies}
-  \textbf{Speech} is produced by a physical system --- the vocal folds exciting
-  the vocal tract --- that is well modelled as a slowly varying \emph{linear
+  \textbf{Speech} is produced by a physical system (the vocal folds exciting
+  the vocal tract) that is well modeled as a slowly varying \emph{linear
   filter} driven by a sparse \emph{excitation}. Coding speech efficiently means
   coding that model: estimate the filter, estimate the pitch, and transmit only
   the residual that the model fails to predict. This is \termdef{linear-predictive
@@ -189,9 +189,9 @@ with the SILK data.
 
 \subsection{The Layered Stack}\label{subsec:stack}
 
-\Cref{fig:stack-table} lists the layers as the implementation modularises them,
+\Cref{fig:stack-table} lists the layers as the implementation modularizes them,
 bottom to top. The lower layers (range coder, packet, Ogg) are pure framing and
-entropy --- exact integer arithmetic, \code{no\_std}-compatible, with no audio
+entropy: exact integer arithmetic, \code{no\_std}-compatible, with no audio
 math. The middle layers (SILK, CELT) perform the signal processing. The top
 layer (the Opus decoder and encoder) provides the glue: mode dispatch,
 resampling, and the cross-frame state used to handle mode transitions.
@@ -220,7 +220,7 @@ resampling, and the cross-frame state used to handle mode transitions.
 To decode one Opus packet, the decoder performs the following steps:
 
 \begin{enumerate}[itemsep=3pt]
-  \item Reads the first byte --- the \termdef{TOC} (Table of Contents) --- which
+  \item Reads the first byte, the \termdef{TOC} (Table of Contents), which
     names the mode, audio bandwidth, frame size, and channel count
     (\cref{sec:packet}).
   \item Splits the remaining bytes into 1--48 \emph{frames} according to the
@@ -269,8 +269,8 @@ The model is stated once here and referred to throughout.
       coded frequency (4, 6, 8, 12, or 20~kHz).
     \item The \textbf{internal rate} is the rate a coder actually runs at. SILK
       runs at 8, 12, or 16~kHz; CELT always runs at 48~kHz.
-    \item The \textbf{API rate} is the rate the caller asks for --- 8, 12, 16,
-      24, or 48~kHz --- at which PCM is delivered.
+    \item The \textbf{API rate} is the rate the caller asks for (8, 12, 16,
+      24, or 48~kHz), at which PCM is delivered.
   \end{itemize}
 
   Crucially, \textbf{all timing is expressed in 48~kHz samples} regardless of
@@ -285,8 +285,8 @@ The model is stated once here and referred to throughout.
 
 \subsection{From Quantities to Symbols}\label{subsec:bits_overview}
 
-Every numeric quantity Opus transmits --- a gain, an LSF index, a pulse vector,
-an energy delta --- becomes a symbol in the range coder. The encoder and decoder
+Every numeric quantity Opus transmits (a gain, an LSF index, a pulse vector,
+an energy delta) becomes a symbol in the range coder. The encoder and decoder
 share static probability models (\termdef{ICDF} tables, \cref{sec:rangecoder})
 for the structured fields and fall back to \termdef{raw bits} for the
 near-uniform ones. This arrangement has an important consequence:
@@ -341,7 +341,7 @@ lie in.
   The interval shrinks by a factor of $(\mathit{fh}-\mathit{fl})/\mathit{ft} =
   p(s)$ at each step, so after the whole message its width is $\prod_i p(s_i) =
   2^{-\sum_i -\log_2 p(s_i)}$. Transmitting \emph{any} number inside the final
-  interval takes about $-\log_2(\text{width}) = \sum_i -\log_2 p(s_i)$ bits ---
+  interval takes about $-\log_2(\text{width}) = \sum_i -\log_2 p(s_i)$ bits,
   the entropy. The decoder, knowing the same model, replays the subdivisions:
   it sees which sub-range the received number falls in, emits that symbol,
   rescales, and repeats.
@@ -349,9 +349,9 @@ lie in.
 
 The practical obstacle is that the interval bounds need ever more precision as
 they shrink, which is impossible with finite-width integers. The fix, due to
-Pasco and refined by Martin, is \termdef{renormalisation}: as soon as the
+Pasco and refined by Martin, is \termdef{renormalization}: as soon as the
 interval is narrow enough that its top bits are settled, \emph{emit those bits}
-and shift them out, restoring headroom. Opus renormalises a byte at a time.
+and shift them out, restoring headroom. Opus renormalizes a byte at a time.
 
 \subsection{The Integer Range Coder}\label{subsec:integer_rc}
 
@@ -359,20 +359,20 @@ Opus's range coder (\S4.1 for the decoder, \S5.1 for the encoder) works in
 32-bit integers. Its state is two words:
 
 \begin{itemize}[itemsep=2pt]
-  \item \code{rng} --- the current interval width, kept in
+  \item \code{rng}: the current interval width, kept in
     $(2^{23}, 2^{31}]$.
-  \item \code{val} --- on the encoder, the interval's low end; on the decoder,
+  \item \code{val}: on the encoder, the interval's low end; on the decoder,
     the offset of the received number from the top of the interval.
 \end{itemize}
 
-The governing constants name the renormalisation threshold and the byte width:
+The governing constants name the renormalization threshold and the byte width:
 
 \begin{lstlisting}[language=Rust]
 const SYM_BITS:  u32 = 8;            // emit/consume one byte at a time
 const SYM_MAX:   u32 = 255;          // 2^8 - 1
 const CODE_BITS: u32 = 32;           // width of the (val, rng) state
 const CODE_TOP:  u32 = 1 << 31;      // 2^31: initial encoder range
-const CODE_BOT:  u32 = 1 << 23;      // 2^23: renormalise when rng falls to here
+const CODE_BOT:  u32 = 1 << 23;      // 2^23: renormalize when rng falls to here
 const CODE_SHIFT: u32 = 23;          // CODE_BITS - SYM_BITS - 1; carry bit position
 
 #[inline]
@@ -389,7 +389,7 @@ everywhere the coder needs $\floor*{\log_2}$.
 
 Decoding is two steps: \code{decode} reports \emph{where} the received value
 sits in $[0, \mathit{ft})$, the caller maps that to a symbol, then \code{update}
-shrinks the state to that symbol's sub-range and renormalises.
+shrinks the state to that symbol's sub-range and renormalizes.
 
 \begin{lstlisting}[language=Rust]
 pub fn decode(&mut self, ft: u32) -> u32 {
@@ -414,7 +414,7 @@ how the coder accounts for the truncation in $s = \floor*{\mathit{rng}/
 $\mathit{ft}$ via \code{.min(ft)} to defend against a corrupt stream pushing the
 quotient out of range.
 
-\subsubsection{The renormalisation loop}
+\subsubsection{The renormalization loop}
 
 When \code{rng} drops to $2^{23}$ or below, the decoder shifts in a fresh byte:
 
@@ -440,7 +440,7 @@ the encoder's carry propagation (below) lands on byte boundaries. The
 
 \subsubsection{Encoding a symbol}
 
-The encoder mirrors the decoder exactly --- it must, or the two will disagree
+The encoder mirrors the decoder exactly; it must, or the two will disagree
 and the stream will be undecodable:
 
 \begin{lstlisting}[language=Rust]
@@ -457,7 +457,7 @@ pub fn encode(&mut self, fl: u32, fh: u32, ft: u32) {
 \end{lstlisting}
 
 The encoder's \code{normalize} emits the top byte of \code{val} instead of
-reading one, but is otherwise the same loop --- with one complication that
+reading one, but is otherwise the same loop, with one complication that
 deserves its own treatment.
 
 \subsection{Carry Propagation}\label{subsec:carry}
@@ -492,7 +492,7 @@ fn carry_out(&mut self, c: u32) {
   A carry into a \code{0xFF} byte turns it into \code{0x00} and \emph{propagates
   further left}. A carry into any other byte simply increments it and stops. So
   the encoder can safely emit a non-\code{0xFF} byte only once it knows whether a
-  carry is coming --- which it learns from the \emph{next} byte. It therefore
+  carry is coming, which it learns from the \emph{next} byte. It therefore
   keeps one pending byte in \code{rem} and counts a run of \code{0xFF}s in
   \code{ext}. When a non-\code{0xFF} byte arrives with carry $c$: the pending
   byte becomes $\mathit{rem}+c$, and the held \code{0xFF}s become either
@@ -507,13 +507,13 @@ fn carry_out(&mut self, c: u32) {
 Structured fields are coded against static probability tables. Opus stores them
 not as a PDF or a forward CDF but as an \termdef{inverse cumulative distribution
 function} (ICDF): for a model with total $2^{\mathit{ftb}}$, the table holds
-$\mathit{icdf}[k] = 2^{\mathit{ftb}} - \mathit{fh}[k]$ --- the cumulative
+$\mathit{icdf}[k] = 2^{\mathit{ftb}} - \mathit{fh}[k]$, the cumulative
 \emph{tail} above each symbol, decreasing to a terminating zero.
 
 \begin{concept}{Why Inverse CDFs}
   Two reasons. First, the decode primitive in \cref{eq:rc_subdivide} naturally
   produces ``how far down from the top is \code{val}'', which is exactly an
-  upper-tail comparison --- so an ICDF lets the decoder walk the table with one
+  upper-tail comparison, so an ICDF lets the decoder walk the table with one
   multiply and one compare per step and no running subtraction. Second, the
   tables are tiny (a handful of bytes), and storing the tail lets the common
   ``most probable symbol first'' ordering terminate early. The forward
@@ -541,12 +541,12 @@ pub fn decode_icdf(&mut self, icdf: &[u8], ftb: u32) -> usize {
 \end{lstlisting}
 
 Because $\mathit{ft} = 2^{\mathit{ftb}}$ is a power of two, the division
-$\mathit{rng}/\mathit{ft}$ becomes a shift --- a small but pervasive saving,
+$\mathit{rng}/\mathit{ft}$ becomes a shift, a small but pervasive saving,
 since ICDF decoding is the hottest path in SILK and in CELT's side information.
 
 \subsection{Binary Symbols and Raw Bits}\label{subsec:binary_raw}
 
-Two specialisations round out the coder.
+Two specializations round out the coder.
 
 \textbf{Binary symbols with a power-of-two probability.} Many flags have a
 probability of the form $2^{-\mathit{logp}}$. These skip the table entirely:
@@ -562,19 +562,19 @@ pub fn decode_bit_logp(&mut self, logp: u32) -> bool {
 }
 \end{lstlisting}
 
-\textbf{Raw bits.} Some quantities are effectively uniform --- a sign, the low
-bits of a pulse split --- and modelling them as probabilities wastes effort.
+\textbf{Raw bits.} Some quantities are effectively uniform (a sign, the low
+bits of a pulse split), and modeling them as probabilities wastes effort.
 Opus codes these as \termdef{raw bits}, written at the \emph{opposite end} of
 the same buffer from the arithmetic-coded data.
 
 \begin{concept}{The Two-Ended Buffer}
   A range-coded packet has \emph{two} write heads in one byte array. The
   arithmetic coder fills from the front, most-significant first, byte by byte as
-  it renormalises. Raw bits fill from the \emph{back}, least-significant first.
+  it renormalizes. Raw bits fill from the \emph{back}, least-significant first.
   The two heads grow toward each other; the packet is well-formed as long as
-  they do not cross. This costs nothing --- raw bits need no probability model,
-  so they need not interleave with the arithmetic stream --- and it lets the
-  finaliser (\cref{subsec:tell}) pack the last arithmetic byte and the last raw
+  they do not cross. This costs nothing: raw bits need no probability model,
+  so they need not interleave with the arithmetic stream, and it lets the
+  finalizer (\cref{subsec:tell}) pack the last arithmetic byte and the last raw
   byte into the same physical byte when they happen to fit. The decoder reads
   raw bits backwards from the end of the packet through a small 32-bit window,
   refilling a byte at a time.
@@ -616,7 +616,7 @@ pub fn encode_uint(&mut self, t: u32, ft: u32) {
 \subsection{Bit Budgeting: tell() and tell\_frac()}\label{subsec:tell}
 
 Opus's bit allocation (\cref{subsec:celt_allocation}) needs to know, mid-frame,
-exactly how many bits have been spent so far --- and it needs that figure to
+exactly how many bits have been spent so far, and it needs that figure to
 \emph{agree} between encoder and decoder, since both run the same allocation
 arithmetic from the same running total. The coder exposes this through
 \code{tell} and its eighth-of-a-bit refinement \code{tell\_frac}.
@@ -639,7 +639,7 @@ pub(crate) fn tell_frac(nbits_total: u32, rng: u32) -> u32 {
 
 \begin{concept}{Bits Used: Total Shifted In Minus Range Headroom}
   The intuition: \code{nbits\_total} counts every bit shifted into the coder.
-  But the coder has not \emph{committed} all of them --- the current range
+  But the coder has not \emph{committed} all of them: the current range
   \code{rng} still spans $\log_2(\mathit{rng})$ bits of undecided value. So the
   bits actually consumed are \code{nbits\_total} $- \log_2(\mathit{rng})$.
   \code{tell()} uses the integer $\floor*{\log_2}$ (a conservative whole-bit
@@ -656,15 +656,15 @@ implementation, described below.
 
 \begin{concept}{rng-Agreement and the Final Range}
   After encoding (or decoding) the same sequence of symbols, the encoder and
-  decoder must hold \emph{identical} \code{rng} values --- and, transitively,
+  decoder must hold \emph{identical} \code{rng} values, and, transitively,
   identical \code{val} and identical output bytes. RFC 6716 elevates this to a
   conformance tool: \code{OPUS\_GET\_FINAL\_RANGE} returns the coder's \code{rng}
   at the end of each packet, and a correct decoder's final range must equal the
   reference encoder's, \emph{exactly}, for every packet.
 
-  This is a remarkably strong check. The entire decode --- thousands of symbols
-  across SILK and CELT, every table lookup, every renormalisation --- collapses
-  into a single 32-bit number that is wrong if \emph{any} step diverged. The
+  This is a strong check. The entire decode (thousands of symbols across SILK
+  and CELT, every table lookup, every renormalization) collapses into a single
+  32-bit number that is wrong if \emph{any} step diverged. The
   \texttt{opus\_native} conformance suite enforces it on all twelve official
   vectors: a passing decode is not merely close to the reference, it is
   arithmetically identical through the entropy coder. The PCM may differ by a

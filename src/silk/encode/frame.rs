@@ -74,6 +74,10 @@ pub(crate) struct SilkChannelEncoder {
     pub ec_prev: EcPrevState,
     pub fs_khz: i32,
     pub nb_subfr: usize,
+    /// Encode complexity 0-10; selects the pitch-search depth/threshold/order
+    /// per libopus's table (the rest of the analysis is already its low-
+    /// complexity configuration: plain NSQ, no warping).
+    pub complexity: u8,
 }
 
 impl SilkChannelEncoder {
@@ -95,12 +99,18 @@ impl SilkChannelEncoder {
             ec_prev: EcPrevState::default(),
             fs_khz,
             nb_subfr,
+            complexity: 10,
         }
     }
 
     /// Sets the target bitrate (bps), which maps to the coding SNR per frame.
     pub(crate) fn set_bitrate(&mut self, bps: i32) {
         self.target_rate_bps = bps;
+    }
+
+    /// Sets the encode complexity 0-10 (clamped), selecting the pitch search.
+    pub(crate) fn set_complexity(&mut self, complexity: u8) {
+        self.complexity = complexity.min(10);
     }
 
     /// Resets the prediction memory for the first coded side frame after a
@@ -148,7 +158,19 @@ impl SilkChannelEncoder {
         // Pitch analysis: whiten and search for the lag. `pitch_x_buf` holds
         // `ltp_mem_length` of history, the frame, then `la_pitch` lookahead;
         // an isolated frame zero-pads the history and lookahead.
-        let pe_order = if self.fs_khz == 16 { 16 } else { 12 };
+        // Pitch-search settings from the complexity (libopus's table): the
+        // estimation complexity (0/1/2), the voicing threshold, and the
+        // whitening LPC order (capped at the prediction order).
+        let (pe_complexity, search_thres, pe_lpc_order): (usize, f32, usize) = match self.complexity {
+            0 => (0, 0.8, 6),
+            1 => (1, 0.76, 8),
+            2 => (0, 0.8, 6),
+            3 => (1, 0.76, 8),
+            4 | 5 => (1, 0.74, 10),
+            6 | 7 => (1, 0.72, 12),
+            _ => (2, 0.7, 16),
+        };
+        let pe_order = pe_lpc_order.min(order);
         let buf_len = la_pitch + frame_length + ltp_mem_length;
         let mut pitch_x_buf = vec![0.0f32; buf_len];
         for (i, &v) in self.prev_input.iter().enumerate() {
@@ -165,8 +187,8 @@ impl SilkChannelEncoder {
             self.fs_khz,
             self.nb_subfr,
             pe_order,
-            2,
-            0.7,
+            pe_complexity,
+            search_thres,
             self.prev_lag,
             self.prev_signal_type,
             vad.speech_activity_q8,

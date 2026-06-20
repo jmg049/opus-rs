@@ -44,6 +44,11 @@ impl SilkEncoder {
         self.ch.set_bitrate(bps);
     }
 
+    /// Sets the encode complexity 0-10 (the pitch-search depth).
+    pub fn set_complexity(&mut self, complexity: u8) {
+        self.ch.set_complexity(complexity);
+    }
+
     /// Encodes `input` to a SILK payload of at most `max_payload` bytes. Each
     /// attempt applies the per-frame hard bit cap (the gain-multiplier rate
     /// control), which scales the gains coarser until the frame fits; if the
@@ -189,6 +194,12 @@ impl SilkStereoEncoder {
     /// Sets the total (both channels) target bitrate (bps).
     pub fn set_bitrate(&mut self, bps: i32) {
         self.total_rate_bps = bps;
+    }
+
+    /// Sets the encode complexity 0-10 for both channels.
+    pub fn set_complexity(&mut self, complexity: u8) {
+        self.mid.set_complexity(complexity);
+        self.side.set_complexity(complexity);
     }
 
     /// The range coder state after the last [`encode`](Self::encode).

@@ -105,6 +105,10 @@ pub struct CeltEncoder {
     scratch_freq: Vec<f32>,
     /// Reused per-channel pre-filter history+frame buffers (`pre`).
     scratch_pre: [Vec<f32>; 2],
+    /// Encode complexity 0-10; gates the pre-filter pitch search (≥5), tf
+    /// analysis (≥2), the second transient MDCT (≥8), the two-pass coarse
+    /// energy (≥4) and spreading (none at 0), matching libopus.
+    complexity: u8,
 }
 
 impl Default for CeltEncoder {
@@ -153,7 +157,13 @@ impl CeltEncoder {
             scratch_inputs: Vec::new(),
             scratch_freq: Vec::new(),
             scratch_pre: [Vec::new(), Vec::new()],
+            complexity: 10,
         }
+    }
+
+    /// Sets the encode complexity 0-10 (clamped), gating the analysis stages.
+    pub const fn set_complexity(&mut self, complexity: u8) {
+        self.complexity = if complexity > 10 { 10 } else { complexity };
     }
 
     /// Encodes one fullband frame of `pcm` (interleaved f32 in `[-1, 1]`;
@@ -345,7 +355,7 @@ impl CeltEncoder {
         // Per-band time/frequency resolution (`tf_analysis`), enabled above a
         // low byte threshold. The result is the raw 0/1 flags plus tf_select.
         let n0 = n;
-        let (mut tf_res, tf_select) = if nb_bytes >= 15 * channels && lm > 0 {
+        let (mut tf_res, tf_select) = if nb_bytes >= 15 * channels && lm > 0 && self.complexity >= 2 {
             let _g = crate::prof::scope("celt:tf_analysis");
             let lambda = 80.max(20480 / nb_bytes as i32 + 2);
             tf_analysis(
@@ -461,20 +471,25 @@ impl CeltEncoder {
             }
         }
 
-        // Spreading decision.
+        // Spreading decision. At complexity 0 the reference forces SPREAD_NONE
+        // (no rotation), which also skips `exp_rotation` in the band loop.
         let mut spread = Spread::Normal;
         if enc.tell() + 4 <= total_bits {
-            let _g = crate::prof::scope("celt:spreading");
-            let s = spreading_decision(
-                &x,
-                n0,
-                &mut self.tonal_average,
-                self.spread_decision,
-                end,
-                channels,
-                m,
-                &dyn_an.spread_weight,
-            );
+            let s = if self.complexity == 0 {
+                Spread::None as i32
+            } else {
+                let _g = crate::prof::scope("celt:spreading");
+                spreading_decision(
+                    &x,
+                    n0,
+                    &mut self.tonal_average,
+                    self.spread_decision,
+                    end,
+                    channels,
+                    m,
+                    &dyn_an.spread_weight,
+                )
+            };
             self.spread_decision = s;
             spread = Spread::from_raw(s as u32);
             enc.encode_icdf(s as usize, &SPREAD_ICDF, 5);
@@ -728,7 +743,7 @@ impl CeltEncoder {
             pre[c][COMBFILTER_MAXPERIOD..].copy_from_slice(&inputs[c * in_len + OVERLAP..c * in_len + OVERLAP + n]);
         }
 
-        let enabled = nb_bytes > 12 * channels;
+        let enabled = nb_bytes > 12 * channels && self.complexity >= 5;
         let (pitch_index, mut gain1) = if enabled {
             let refs: Vec<&[f32]> = pre[..channels].iter().map(Vec::as_slice).collect();
             let _ds = crate::prof::scope("celt:pf_downsample");

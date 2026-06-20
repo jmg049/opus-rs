@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.27)  20 JUN 2026 12:22
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.27)  20 JUN 2026 15:07
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -1433,10 +1433,10 @@ LaTeX Warning: Reference `sec:opus_layer' on page 1 undefined on input line 169
 LaTeX Warning: Reference `subsec:hybrid' on page 1 undefined on input line 185.
 
 
-[4]
 
 LaTeX Warning: Reference `sec:packet' on page 1 undefined on input line 225.
 
+[4]
 
 LaTeX Warning: Reference `sec:opus_layer' on page 1 undefined on input line 233
 .
@@ -1489,21 +1489,21 @@ Package mdframed Info: mdframed detected package amsthm
 Package mdframed Info: mdframed detected package amsthm 
  changed the theorem header of amsthm
 (mdframed)              on input line 446.
- [8]
 Package mdframed Info: mdframed detected package amsthm 
  changed the theorem header of amsthm
 (mdframed)              on input line 471.
- [9]
+ [8]
 Package mdframed Info: mdframed detected package amsthm 
  changed the theorem header of amsthm
 (mdframed)              on input line 524.
+ [9]
 Package mdframed Info: mdframed detected package amsthm 
  changed the theorem header of amsthm
 (mdframed)              on input line 554.
- [10]
 Package mdframed Info: mdframed detected package amsthm 
  changed the theorem header of amsthm
 (mdframed)              on input line 583.
+ [10]
 Package mdframed Info: mdframed detected package amsthm 
  changed the theorem header of amsthm
 (mdframed)              on input line 603.
@@ -1540,7 +1540,7 @@ LaTeX Warning: There were undefined references.
 
 Package rerunfilecheck Info: File `"The Opus Audio Codec - Theory and Implement
 ation".out' has not changed.
-(rerunfilecheck)             Checksum: D2DE81E109B736222D4FD978383AB19E;4228.
+(rerunfilecheck)             Checksum: E83B80D3A21F6993E5315F2AEDA3A248;4228.
 
 Package biblatex Warning: Please (re)run Biber on the file:
 (biblatex)                "The Opus Audio Codec - Theory and Implementation"
@@ -1554,7 +1554,7 @@ plementation".run.xml'.
 Here is how much of TeX's memory you used:
  39321 strings out of 469515
  785226 string characters out of 5470807
- 1883470 words of memory out of 5000000
+ 1900473 words of memory out of 5000000
  67214 multiletter control sequences out of 15000+600000
  637685 words of font info for 77 fonts, out of 8000000 for 9000
  14 hyphenation exceptions out of 8191
@@ -1577,7 +1577,7 @@ r/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt10.pfb></usr/share/texmf-
 dist/fonts/type1/public/amsfonts/cm/cmtt12.pfb></usr/share/texmf-dist/fonts/typ
 e1/public/cm-super/sfrm1095.pfb>
 Output written on "./build/The Opus Audio Codec - Theory and Implementation.pdf
-" (13 pages, 297935 bytes).
+" (13 pages, 297135 bytes).
 PDF statistics:
  550 PDF objects out of 1000 (max. 8388607)
  466 compressed objects within 5 object streams

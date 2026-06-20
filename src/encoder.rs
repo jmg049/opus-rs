@@ -133,6 +133,10 @@ pub struct OpusEncoder {
     /// Adaptive background-noise-floor estimate (mean square) for the DTX
     /// activity detector, so pauses are detected relative to the ambient level.
     dtx_noise_floor: f32,
+    /// Encode complexity 0-10 (`OPUS_SET_COMPLEXITY`); trades analysis depth for
+    /// speed, mirroring libopus's mapping. Drives the SILK pitch/shaping
+    /// settings and the CELT prefilter/tf/spreading gates.
+    complexity: u8,
 }
 
 impl OpusEncoder {
@@ -157,7 +161,20 @@ impl OpusEncoder {
             dtx_no_activity_q1: 0,
             last_toc: 0,
             dtx_noise_floor: 1.0,
+            complexity: 10,
         }
+    }
+
+    /// Sets the encode complexity 0-10 (`OPUS_SET_COMPLEXITY`), clamped. Higher
+    /// is better quality and slower; the default is 5, matching libopus. This
+    /// is what makes a like-for-like speed comparison possible: at complexity 0
+    /// the encoder skips the same analysis libopus skips at complexity 0 (the
+    /// CELT pre-filter pitch search, tf analysis, spreading; the deepest SILK
+    /// pitch search).
+    pub const fn set_complexity(&mut self, complexity: u8) {
+        let c = if complexity > 10 { 10 } else { complexity };
+        self.complexity = c;
+        self.celt.set_complexity(c);
     }
 
     /// Voice-activity test for DTX: a frame is active when its mean-square
@@ -432,6 +449,7 @@ impl OpusEncoder {
             }
             let (silk, resampler, _, _) = self.silk.as_mut().expect("configured");
             silk.set_bitrate(bitrate.clamp(5000, 80_000));
+            silk.set_complexity(self.complexity);
             let internal = crate::silk::encode::resample_in::resample_48k(resampler, pcm);
             // Closed-loop rate control: fit the byte budget (less the TOC).
             let p = silk
@@ -456,6 +474,7 @@ impl OpusEncoder {
             }
             let (silk, rl, rr, _, _) = self.silk_stereo.as_mut().expect("configured");
             silk.set_bitrate(bitrate.clamp(5000, 100_000));
+            silk.set_complexity(self.complexity);
             let lf: Vec<f32> = pcm.iter().step_by(2).copied().collect();
             let rf: Vec<f32> = pcm.iter().skip(1).step_by(2).copied().collect();
             let li = crate::silk::encode::resample_in::resample_48k(rl, &lf);
@@ -544,6 +563,7 @@ impl OpusEncoder {
             }
             let (silk, resampler, _, _) = self.silk.as_mut().expect("configured");
             silk.set_bitrate(silk_bps);
+            silk.set_complexity(self.complexity);
             let internal = crate::silk::encode::resample_in::resample_48k(resampler, pcm);
             // Hard bit cap so the SILK low band leaves the CELT high band room.
             silk.encode_into(&mut enc, &internal, Some((silk_cap * 8) as i32));
@@ -564,6 +584,7 @@ impl OpusEncoder {
             }
             let (silk, rl, rr, _, _) = self.silk_stereo.as_mut().expect("configured");
             silk.set_bitrate(silk_bps);
+            silk.set_complexity(self.complexity);
             let lf: Vec<f32> = pcm.iter().step_by(2).copied().collect();
             let rf: Vec<f32> = pcm.iter().skip(1).step_by(2).copied().collect();
             let li = crate::silk::encode::resample_in::resample_48k(rl, &lf);
