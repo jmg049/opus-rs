@@ -1,0 +1,240 @@
+\documentclass[a4paper,11pt]{article}
+
+% ========================================
+% Page Layout and Geometry
+% ========================================
+\usepackage[margin=0.75in, top=0.5in, bottom=0.75in]{geometry}
+
+% ========================================
+% Mathematical Packages
+% ========================================
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+
+% ========================================
+% Graphics and Color
+% ========================================
+\usepackage{graphicx}
+\usepackage[dvipsnames]{xcolor}
+
+% ========================================
+% Tables and Layout
+% ========================================
+\usepackage{multicol}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+
+% ========================================
+% Lists and Enumeration
+% ========================================
+\usepackage{enumitem}
+\setlist{itemsep=2pt, parsep=2pt}
+
+% ========================================
+% Code Listings
+% ========================================
+\usepackage{needspace}
+\usepackage{mdframed}
+\usepackage{listings}
+\lstset{
+  basicstyle=\small\ttfamily,
+  breaklines=true,
+  backgroundcolor=\color{gray!10},
+  commentstyle=\color{ForestGreen},
+  keywordstyle=\color{blue},
+  stringstyle=\color{red},
+  numbers=none,
+  xleftmargin=10pt,
+  xrightmargin=10pt,
+  aboveskip=8pt,
+  belowskip=8pt
+}
+
+% Rust-flavoured keyword highlighting for listings
+\lstdefinelanguage{Rust}{
+  keywords={as,break,const,continue,crate,dyn,else,enum,extern,false,fn,for,if,
+    impl,in,let,loop,match,mod,move,mut,pub,ref,return,self,Self,static,struct,
+    super,trait,true,type,unsafe,use,where,while,async,await,union},
+  morekeywords=[2]{i8,i16,i32,i64,u8,u16,u32,u64,usize,isize,f32,f64,bool,char,
+    str,Vec,Option,Result,Some,None,Ok,Err,Box},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
+\lstset{
+  keywordstyle=[2]\color{purple},
+}
+
+% Unbreakable framed environment for code
+\surroundwithmdframed[
+  linecolor=black,
+  linewidth=0.5pt,
+  backgroundcolor=gray!10,
+  skipabove=8pt,
+  skipbelow=8pt,
+  innerleftmargin=10pt,
+  innerrightmargin=10pt,
+  innertopmargin=5pt,
+  innerbottommargin=5pt,
+  nobreak=true
+]{lstlisting}
+
+% ========================================
+% Definition Boxes and Theorems
+% ========================================
+\usepackage[most]{tcolorbox}
+
+% Definition box style
+\newtcolorbox{definition}[1][]{
+  colback=blue!5!white,
+  colframe=blue!75!black,
+  fonttitle=\bfseries,
+  title=Definition,
+  #1
+}
+
+% Concept box for important terms
+\newtcolorbox{concept}[1]{
+  colback=green!5!white,
+  colframe=green!60!black,
+  fonttitle=\bfseries,
+  title={#1},
+  before skip=10pt,
+  after skip=10pt
+}
+
+% Important note box
+\newtcolorbox{importantnote}{
+  colback=orange!5!white,
+  colframe=orange!75!black,
+  fonttitle=\bfseries,
+  title=Important Note,
+  before skip=10pt,
+  after skip=10pt
+}
+
+% Implementation box for code-centric asides
+\newtcolorbox{implementation}[1]{
+  colback=gray!5!white,
+  colframe=gray!55!black,
+  fonttitle=\bfseries,
+  title={#1},
+  before skip=10pt,
+  after skip=10pt
+}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+% ========================================
+% Hyperlinks and References
+% ========================================
+\usepackage[
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=red!50!black,
+  urlcolor=blue!50!black,
+  bookmarks=true,
+  bookmarksopen=true,
+  pdfauthor={Jack Geraghty},
+  pdftitle={The Opus Audio Codec: Theory and Implementation}
+]{hyperref}
+
+% Better equation referencing
+\usepackage[capitalize,noabbrev]{cleveref}
+\crefname{equation}{Equation}{Equations}
+\crefname{section}{Section}{Sections}
+\crefname{figure}{Figure}{Figures}
+\crefname{table}{Table}{Tables}
+
+% ========================================
+% Bibliography
+% ========================================
+\usepackage[
+  backend=biber,
+  style=numeric,
+  sorting=nyt,
+  maxbibnames=99
+]{biblatex}
+\addbibresource{references.bib}
+
+% ========================================
+% Custom Commands
+% ========================================
+
+% Math operators
+\DeclareMathOperator{\DFT}{DFT}
+\DeclareMathOperator{\FFT}{FFT}
+\DeclareMathOperator{\IFFT}{IFFT}
+\DeclareMathOperator{\MDCT}{MDCT}
+\DeclareMathOperator{\IMDCT}{IMDCT}
+\DeclareMathOperator{\sgn}{sgn}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% Complex conjugate
+\newcommand{\conj}[1]{#1^*}
+
+% Real and imaginary parts
+\DeclareMathOperator{\Real}{Re}
+\DeclareMathOperator{\Imag}{Im}
+
+% Floor and ceiling
+\DeclarePairedDelimiter{\floor}{\lfloor}{\rfloor}
+\DeclarePairedDelimiter{\ceil}{\lceil}{\rceil}
+
+% Absolute value and norm
+\DeclarePairedDelimiter{\abs}{\lvert}{\rvert}
+\DeclarePairedDelimiter{\norm}{\lVert}{\rVert}
+
+% Code inline
+\newcommand{\code}[1]{\texttt{#1}}
+
+% Emphasis for technical terms on first use
+\newcommand{\termdef}[1]{\textbf{\textit{#1}}}
+
+% A Q-format fixed-point shorthand: \Q{15} -> Q15
+\newcommand{\Q}[1]{Q\ensuremath{#1}}
+
+% ========================================
+% Typography and Spacing
+% ========================================
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% Better spacing in equations
+\setlength{\jot}{8pt}
+
+\title{The \texttt{Opus} Audio Codec:\\ Theory and Implementation}
+\author{Jack Geraghty}
+\date{}
+
+% ========================================
+% Document Content
+% ========================================
+\begin{document}
+\maketitle
+\tableofcontents
+\clearpage
+\input{manual.tex}
+
+% ========================================
+% Python API Reference Guide
+% ========================================
+\input{python_guide.tex}
+
+% ========================================
+% Bibliography
+% ========================================
+\newpage
+\printbibliography[title={References}]
+
+\end{document}

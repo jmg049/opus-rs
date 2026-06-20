@@ -1,0 +1,52 @@
+% ============================================
+% Python API Reference Guide
+% Practical applications using the opus_native library from Python
+% ============================================
+
+\section{Python API Reference}\label{sec:python_guide}
+
+\subsection{Introduction}\label{subsec:python_intro}
+
+Python bindings for \texttt{opus\_native} are planned but not yet released. This
+section is reserved for the complete Python reference --- installation, the
+encoder and decoder objects, streaming and file (Ogg Opus) helpers, and worked
+examples that apply the concepts from the preceding sections in practice.
+
+\begin{importantnote}
+  This chapter is a placeholder. The bindings (a \texttt{PyO3} extension module
+  mirroring the Rust \code{OpusEncoder}/\code{OpusDecoder} surface, with NumPy
+  buffer-protocol interop for PCM) are under construction. Until they ship, use
+  the Rust API documented in \cref{sec:opus_layer} directly, or call the C
+  reference \texttt{libopus} through an existing binding. The remainder of this
+  section is intentionally left blank and will be filled in alongside the
+  first binding release.
+\end{importantnote}
+
+\needspace{6\baselineskip}
+\subsection*{Installation and Imports}
+
+% TODO(python): pip install opus_native; import opus_native as opus
+
+\needspace{6\baselineskip}
+\subsection*{Decoding}
+
+% TODO(python): OpusDecoder(channels, sample_rate); decode_packet -> ndarray;
+% decode_ogg_opus(bytes) -> (ndarray, OpusHead)
+
+\needspace{6\baselineskip}
+\subsection*{Encoding}
+
+% TODO(python): OpusEncoder(channels, sample_rate); set_bitrate / set_bandwidth /
+% set_dtx; encode_auto(pcm) -> bytes; encode_ogg_opus(pcm, channels, bitrate)
+
+\needspace{6\baselineskip}
+\subsection*{Streaming and Files}
+
+% TODO(python): OggOpusReader / OggOpusWriter; frame-by-frame streaming;
+% packet loss / FEC / DTX worked examples
+
+\needspace{6\baselineskip}
+\subsection*{Complete API Reference}
+
+% TODO(python): exhaustive class/function reference, mirroring the structure of
+% sec:opus_layer once the binding surface is frozen.

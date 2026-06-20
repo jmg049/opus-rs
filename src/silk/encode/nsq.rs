@@ -101,12 +101,19 @@ pub(crate) struct NsqConfig {
 /// `silk_noise_shape_quantizer_short_prediction`: the LPC prediction (Q10).
 ///
 /// `coef_rev` is the prediction coefficients reversed (so the descending
-/// history access `buf[base-j]·coef[j]` becomes a forward windowed dot the
-/// fixed-point SIMD kernel handles); it is reversed once per subframe by the
-/// caller. The result is bit-identical to the scalar SMLAWB chain.
+/// history access `buf[base-j]·coef[j]` becomes a forward windowed dot),
+/// reversed once per subframe by the caller. This is a short (≤16-tap) dot
+/// called once per sample, where the scalar SMLAWB chain beats a SIMD kernel
+/// (the call + horizontal-fold overhead does not amortise over so few taps).
+#[inline]
 fn short_prediction(buf: &[i32], base: usize, coef_rev: &[i16]) -> i32 {
     let order = coef_rev.len();
-    crate::simd::dot_smlawb_q16((order >> 1) as i32, &buf[base + 1 - order..=base], coef_rev)
+    let w = &buf[base + 1 - order..=base];
+    let mut out = (order >> 1) as i32;
+    for j in 0..order {
+        out = smlawb(out, w[j], i32::from(coef_rev[j]));
+    }
+    out
 }
 
 /// `silk_NSQ_noise_shape_feedback_loop`: AR shaping with the shift-register
@@ -119,7 +126,11 @@ fn noise_shape_feedback_loop(data0: i32, data1: &mut [i32], coef: &[i16], order:
     let mut shifted = [0i32; MAX_SHAPE_LPC_ORDER];
     shifted[0] = data0;
     shifted[1..order].copy_from_slice(&data1[..order - 1]);
-    let out = crate::simd::dot_smlawb_q16((order >> 1) as i32, &shifted[..order], &coef[..order]);
+    // Short (≤16-tap) per-sample dot - scalar beats the SIMD kernel here.
+    let mut out = (order >> 1) as i32;
+    for k in 0..order {
+        out = smlawb(out, shifted[k], i32::from(coef[k]));
+    }
     data1[..order].copy_from_slice(&shifted[..order]);
     out << 1
 }
