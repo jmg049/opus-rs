@@ -52,6 +52,76 @@ pub(crate) fn dual_dot(x: &[f32], y1: &[f32], y2: &[f32]) -> (f32, f32) {
     }
 }
 
+/// Cross-correlation `out[i] = Σ_j x[j]·y[i+j]` for `i` in `0..out.len()`
+/// (`celt_pitch_xcorr`). Computes four lags per pass so each `x` block is
+/// loaded once and shared across them (libopus's `xcorr_kernel`), instead of an
+/// independent dot per lag. `y` must be at least `out.len() + len - 1` long.
+#[cfg_attr(target_arch = "x86_64", allow(unsafe_code))]
+pub(crate) fn pitch_xcorr(x: &[f32], y: &[f32], out: &mut [f32], len: usize) {
+    debug_assert!(x.len() >= len && y.len() + 1 >= out.len() + len);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            // SAFETY: AVX2 gated; the kernel reads `x[..len]` and `y[i..i+len]`
+            // for `i < out.len()`, all within the asserted bounds.
+            unsafe { pitch_xcorr_avx2(x, y, out, len) };
+            return;
+        }
+    }
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = dot(&x[..len], &y[i..]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn pitch_xcorr_avx2(x: &[f32], y: &[f32], out: &mut [f32], len: usize) {
+    use core::arch::x86_64::*;
+    let max_pitch = out.len();
+    let (xp, yp) = (x.as_ptr(), y.as_ptr());
+    // SAFETY: 8-wide loads of `x[j..]` (j+8≤len via the tail split) and
+    // `y[i+j..]` (i+3+j+8 ≤ out.len()+len ≤ y.len()+1) stay in bounds.
+    unsafe {
+        let mut i = 0;
+        while i + 4 <= max_pitch {
+            let (mut s0, mut s1, mut s2, mut s3) = (
+                _mm256_setzero_ps(),
+                _mm256_setzero_ps(),
+                _mm256_setzero_ps(),
+                _mm256_setzero_ps(),
+            );
+            let mut j = 0;
+            while j + 8 <= len {
+                let xv = _mm256_loadu_ps(xp.add(j));
+                s0 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(yp.add(i + j)), s0);
+                s1 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(yp.add(i + 1 + j)), s1);
+                s2 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(yp.add(i + 2 + j)), s2);
+                s3 = _mm256_fmadd_ps(xv, _mm256_loadu_ps(yp.add(i + 3 + j)), s3);
+                j += 8;
+            }
+            let (mut r0, mut r1, mut r2, mut r3) = (hsum256(s0), hsum256(s1), hsum256(s2), hsum256(s3));
+            while j < len {
+                let xv = *xp.add(j);
+                r0 += xv * *yp.add(i + j);
+                r1 += xv * *yp.add(i + 1 + j);
+                r2 += xv * *yp.add(i + 2 + j);
+                r3 += xv * *yp.add(i + 3 + j);
+                j += 1;
+            }
+            *out.get_unchecked_mut(i) = r0;
+            *out.get_unchecked_mut(i + 1) = r1;
+            *out.get_unchecked_mut(i + 2) = r2;
+            *out.get_unchecked_mut(i + 3) = r3;
+            i += 4;
+        }
+        while i < max_pitch {
+            out[i] = dot(&x[..len], &y[i..]);
+            i += 1;
+        }
+    }
+}
+
 /// 6-tap FIR: `out[j] = Σ_{k=0..6} inp[j+k]·c[k]` for `j` in `0..out.len()`.
 /// `inp` must be at least `out.len() + 5` long. Used by the CELT pitch
 /// downsampler's whitening filter (`celt_fir5`, expressed with an explicit

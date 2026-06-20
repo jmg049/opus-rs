@@ -37,11 +37,10 @@ fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) 
     crate::simd::dual_dot(&x[..n], y01, y02)
 }
 
-/// Cross-correlation `xcorr[i] = Σ_j x[j]·y[i+j]` (`celt_pitch_xcorr`).
+/// Cross-correlation `xcorr[i] = Σ_j x[j]·y[i+j]` (`celt_pitch_xcorr`), via the
+/// batched 4-lag SIMD kernel.
 fn pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitch: usize) {
-    for i in 0..max_pitch {
-        xcorr[i] = inner_prod(x, &y[i..], len);
-    }
+    crate::simd::pitch_xcorr(x, y, &mut xcorr[..max_pitch], len);
 }
 
 /// Picks the two best lags by normalised correlation (`find_best_pitch`).

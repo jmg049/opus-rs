@@ -731,10 +731,15 @@ impl CeltEncoder {
         let enabled = nb_bytes > 12 * channels;
         let (pitch_index, mut gain1) = if enabled {
             let refs: Vec<&[f32]> = pre[..channels].iter().map(Vec::as_slice).collect();
+            let _ds = crate::prof::scope("celt:pf_downsample");
             let x_lp = pitch_downsample(&refs, pre_len);
+            drop(_ds);
             let max_pitch = COMBFILTER_MAXPERIOD - 3 * COMBFILTER_MINPERIOD;
+            let _ps = crate::prof::scope("celt:pf_search");
             let coarse = pitch_search(&x_lp[COMBFILTER_MAXPERIOD >> 1..], &x_lp, n, max_pitch);
+            drop(_ps);
             let mut pitch_index = COMBFILTER_MAXPERIOD - coarse;
+            let _rd = crate::prof::scope("celt:pf_doubling");
             let (gain, refined) = remove_doubling(
                 &x_lp,
                 COMBFILTER_MAXPERIOD,
@@ -744,6 +749,7 @@ impl CeltEncoder {
                 self.prefilter_period,
                 self.prefilter_gain,
             );
+            drop(_rd);
             pitch_index = refined.min(COMBFILTER_MAXPERIOD - 2);
             (pitch_index, 0.7 * gain)
         } else {
