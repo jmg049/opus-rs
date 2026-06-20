@@ -64,6 +64,13 @@ pub(crate) struct NsqState {
     pub rand_seed: i32,
     pub prev_gain_q16: i32,
     pub rewhite_flag: bool,
+    /// Per-call scratch reused across frames (and across the rate-control
+    /// loop's re-quantisations) to avoid three heap allocations per `nsq`
+    /// call; `nsq` re-initialises them on entry, so their carried contents
+    /// are irrelevant.
+    scratch_s_ltp_q15: Vec<i32>,
+    scratch_s_ltp: Vec<i16>,
+    scratch_x_sc_q10: Vec<i32>,
 }
 
 impl NsqState {
@@ -83,6 +90,9 @@ impl NsqState {
             rand_seed: 0,
             prev_gain_q16: 65536,
             rewhite_flag: false,
+            scratch_s_ltp_q15: Vec::new(),
+            scratch_s_ltp: Vec::new(),
+            scratch_x_sc_q10: Vec::new(),
         }
     }
 }
@@ -109,9 +119,11 @@ pub(crate) struct NsqConfig {
 fn short_prediction(buf: &[i32], base: usize, coef_rev: &[i16]) -> i32 {
     let order = coef_rev.len();
     let w = &buf[base + 1 - order..=base];
+    // `w` and `coef_rev` are both exactly `order` long; zipping drops the
+    // per-tap bounds checks in this once-per-sample dot.
     let mut out = (order >> 1) as i32;
-    for j in 0..order {
-        out = smlawb(out, w[j], i32::from(coef_rev[j]));
+    for (&wj, &cj) in w.iter().zip(coef_rev.iter()) {
+        out = smlawb(out, wj, i32::from(cj));
     }
     out
 }
@@ -127,9 +139,11 @@ fn noise_shape_feedback_loop(data0: i32, data1: &mut [i32], coef: &[i16], order:
     shifted[0] = data0;
     shifted[1..order].copy_from_slice(&data1[..order - 1]);
     // Short (≤16-tap) per-sample dot - scalar beats the SIMD kernel here.
+    // Zip `shifted[..order]` with `coef` (both `order` long) to drop the
+    // per-tap bounds checks.
     let mut out = (order >> 1) as i32;
-    for k in 0..order {
-        out = smlawb(out, shifted[k], i32::from(coef[k]));
+    for (&s, &c) in shifted[..order].iter().zip(coef.iter()) {
+        out = smlawb(out, s, i32::from(c));
     }
     data1[..order].copy_from_slice(&shifted[..order]);
     out << 1
@@ -378,9 +392,19 @@ pub(crate) fn nsq(
     let offset_q10 = i32::from(QUANTIZATION_OFFSETS_Q10[(signal_type >> 1) as usize][quant_offset_type as usize]);
     let lsf_interp_flag = i32::from(nlsf_interp_coef_q2 != 4);
 
-    let mut s_ltp_q15 = vec![0i32; cfg.ltp_mem_length + cfg.frame_length];
-    let mut s_ltp = vec![0i16; cfg.ltp_mem_length + cfg.frame_length];
-    let mut x_sc_q10 = vec![0i32; cfg.subfr_length];
+    // Reuse the scratch buffers (taken out so the sub-functions can borrow
+    // `&mut nsq`); clear+resize zero-fills to match the reference's fresh
+    // stack arrays. Restored before returning.
+    let buf_len = cfg.ltp_mem_length + cfg.frame_length;
+    let mut s_ltp_q15 = core::mem::take(&mut nsq.scratch_s_ltp_q15);
+    let mut s_ltp = core::mem::take(&mut nsq.scratch_s_ltp);
+    let mut x_sc_q10 = core::mem::take(&mut nsq.scratch_x_sc_q10);
+    s_ltp_q15.clear();
+    s_ltp_q15.resize(buf_len, 0);
+    s_ltp.clear();
+    s_ltp.resize(buf_len, 0);
+    x_sc_q10.clear();
+    x_sc_q10.resize(cfg.subfr_length, 0);
 
     nsq.s_ltp_shp_buf_idx = cfg.ltp_mem_length;
     nsq.s_ltp_buf_idx = cfg.ltp_mem_length;
@@ -400,10 +424,11 @@ pub(crate) fn nsq(
                 let start_idx = cfg.ltp_mem_length - lag as usize - cfg.predict_lpc_order - LTP_ORDER / 2;
                 let xq_off = start_idx + k * cfg.subfr_length;
                 let len = cfg.ltp_mem_length - start_idx;
-                let input: Vec<i16> = nsq.xq[xq_off..xq_off + len].to_vec();
+                // `s_ltp` (output) and `nsq.xq` (input) are distinct buffers, so the
+                // filter reads and writes without aliasing - no input copy needed.
                 lpc_analysis_filter(
                     &mut s_ltp[start_idx..start_idx + len],
-                    &input,
+                    &nsq.xq[xq_off..xq_off + len],
                     &a_q12[..cfg.predict_lpc_order],
                 );
                 nsq.rewhite_flag = true;
@@ -457,6 +482,11 @@ pub(crate) fn nsq(
         .copy_within(cfg.frame_length..cfg.frame_length + cfg.ltp_mem_length, 0);
     nsq.s_ltp_shp_q14
         .copy_within(cfg.frame_length..cfg.frame_length + cfg.ltp_mem_length, 0);
+
+    // Return the scratch allocations for the next call to reuse.
+    nsq.scratch_s_ltp_q15 = s_ltp_q15;
+    nsq.scratch_s_ltp = s_ltp;
+    nsq.scratch_x_sc_q10 = x_sc_q10;
 }
 
 #[cfg(test)]
