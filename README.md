@@ -83,12 +83,13 @@ libopus, so binding ≈ native C.
 
 | Mode | `opus_native` | libopus 1.6 | speedup |
 |------|---------------|-------------|---------|
-| SILK wideband 16 kb/s | **2070×** | 1160× | **1.8× faster** |
+| SILK wideband 16 kb/s | **2090×** | 1160× | **1.8× faster** |
 | hybrid fullband 32 kb/s | **1180×** | 800× | **1.5× faster** |
-| CELT fullband 64 kb/s | 1100× | 1470× | 0.75× |
+| CELT fullband 64 kb/s | 1320× | 1540× | 0.87× |
 
-We decode speech (SILK/hybrid) faster than SIMD libopus; CELT (MDCT-heavy) is
-the one mode where libopus's SIMD wins.
+We decode speech (SILK/hybrid) faster than SIMD libopus. CELT is closest to
+libopus's SIMD (0.87×) after the table-driven CWRS rewrite; the residual gap is
+the MDCT, where libopus's SIMD still wins.
 
 **Encode** (× realtime). libopus has a complexity knob (0-10); `opus_native`
 sits around complexity 0, so c0 is the fair algorithmic comparison and c10 is
