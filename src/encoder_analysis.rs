@@ -55,55 +55,69 @@ pub(crate) fn analyze_frame(pcm: &[f32], channels: usize) -> FrameAnalysis {
         };
     }
 
-    // Down-mix to mono (the mode decision is a per-stream property; libopus
-    // analyses the downmix too).
-    let mut mono = alloc::vec![0.0f32; n];
-    if ch == 1 {
-        mono.copy_from_slice(&pcm[..n]);
-    } else {
-        for i in 0..n {
-            let mut acc = 0.0f32;
-            for c in 0..ch {
-                acc += pcm[i * ch + c];
-            }
-            mono[i] = acc / ch as f32;
-        }
-    }
-
-    // --- Total energy (level / silence gate) -------------------------------
-    let energy = mono.iter().map(|&v| v * v).sum::<f32>() / n as f32;
-
-    // --- Band energies via cheap RC filters --------------------------------
-    // We measure energy in six cumulative high-pass-residual buckets by running
-    // a chain of one-pole low-pass filters at the bandwidth edges and taking
-    // the energy *removed* between adjacent cutoffs as the band energy. Cutoffs
-    // (Hz): 4000 (NB edge), 6000 (MB), 8000 (WB), 12000 (SWB); everything above
-    // 12 kHz is the FB band. The lowpass coefficient for cutoff f is
-    // a = dt/(rc+dt), rc = 1/(2*pi*f), dt = 1/48000.
+    // Everything below is gathered in ONE pass over the frame, down-mixing to
+    // mono on the fly (no scratch buffer): total energy, four band-edge
+    // low-pass energies, the lag-1 autocorrelation, and the zero-crossing
+    // count. The per-sample arithmetic and its accumulation order are identical
+    // to computing each in its own pass, so the analysis result - and every
+    // mode/bandwidth decision it drives - is byte-for-byte unchanged; it is
+    // just one sweep instead of seven.
+    //
+    // The band energies come from one-pole low-pass filters at the bandwidth
+    // edges (Hz): 4000 (NB), 6000 (MB), 8000 (WB), 12000 (SWB); above 12 kHz is
+    // FB. The slice energy is the increase between successive low-pass energies.
+    // The lowpass coefficient for cutoff f is a = dt/(rc+dt), rc = 1/(2*pi*f),
+    // dt = 1/48000.
     const FS: f32 = 48_000.0;
     let lp_coef = |f_hz: f32| -> f32 {
         let rc = 1.0 / (core::f32::consts::TAU * f_hz);
         let dt = 1.0 / FS;
         dt / (rc + dt)
     };
-    let cutoffs = [4_000.0f32, 6_000.0, 8_000.0, 12_000.0];
-    // Energy of the signal low-passed at each cutoff.
-    let mut lp_energy = [0.0f32; 4];
-    for (k, &fc) in cutoffs.iter().enumerate() {
-        let a = lp_coef(fc);
-        let mut y = 0.0f32;
-        let mut e = 0.0f32;
-        for &x in &mono {
-            y += a * (x - y);
-            e += y * y;
+    let (a0, a1, a2, a3) = (lp_coef(4_000.0), lp_coef(6_000.0), lp_coef(8_000.0), lp_coef(12_000.0));
+
+    let mut energy_acc = 0.0f32;
+    let (mut y0, mut y1, mut y2, mut y3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut e0, mut e1, mut e2, mut e3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut r0, mut r1) = (0.0f32, 0.0f32);
+    let mut zc = 0usize;
+    let mut prev = 0.0f32;
+    for i in 0..n {
+        // Down-mix this sample to mono (the mode decision is a per-stream
+        // property; the downmix is analysed as one signal).
+        let x = if ch == 1 {
+            pcm[i]
+        } else {
+            let mut acc = 0.0f32;
+            for c in 0..ch {
+                acc += pcm[i * ch + c];
+            }
+            acc / ch as f32
+        };
+        energy_acc += x * x;
+        y0 += a0 * (x - y0);
+        e0 += y0 * y0;
+        y1 += a1 * (x - y1);
+        e1 += y1 * y1;
+        y2 += a2 * (x - y2);
+        e2 += y2 * y2;
+        y3 += a3 * (x - y3);
+        e3 += y3 * y3;
+        if i >= 1 {
+            // Lag-1 autocorrelation (spectral tilt) and zero-crossing rate.
+            r0 += x * x;
+            r1 += x * prev;
+            if (x >= 0.0) != (prev >= 0.0) {
+                zc += 1;
+            }
         }
-        lp_energy[k] = e / n as f32;
+        prev = x;
     }
+    let energy = energy_acc / n as f32;
+    let lp_energy = [e0 / n as f32, e1 / n as f32, e2 / n as f32, e3 / n as f32];
+
     // Band energies (energy in each frequency slice):
     //   b0: 0..4k, b1: 4..6k, b2: 6..8k, b3: 8..12k, b4: 12k..24k
-    // A wider low-pass passes everything a narrower one does plus more, so the
-    // slice energy is the increase between successive low-pass energies; the
-    // top slice is what the widest low-pass dropped vs the full signal.
     let e_total = energy.max(1e-12);
     let b0 = lp_energy[0];
     let b1 = (lp_energy[1] - lp_energy[0]).max(0.0);
@@ -111,37 +125,17 @@ pub(crate) fn analyze_frame(pcm: &[f32], channels: usize) -> FrameAnalysis {
     let b3 = (lp_energy[3] - lp_energy[2]).max(0.0);
     let b4 = (e_total - lp_energy[3]).max(0.0);
 
-    // Fraction of energy above 8 kHz (the wideband edge): music spreads here,
-    // narrowband/wideband speech does not.
+    // Fraction of energy above 8 kHz (music spreads here, speech does not),
+    // in the top octave (>12 kHz, decisive for fullband music), and in the
+    // <4 kHz speech formant region.
     let high_frac = (b3 + b4) / e_total;
-    // Fraction of energy in the very top octave (>12 kHz): only fullband music
-    // / cymbals / sibilance reach here.
     let top_frac = b4 / e_total;
-    // Low-band (speech formant region, <4 kHz) fraction.
     let low_frac = b0 / e_total;
 
-    // --- Spectral tilt -----------------------------------------------------
-    // The normalised one-lag autocorrelation. A value near +1 means a smooth,
-    // strongly low-pass signal (voiced speech, bass-heavy tone); near 0 means a
-    // broadband / noise-like signal. libopus's analysis uses a tonality measure
-    // from the MDCT; this lag-1 correlation is the time-domain analogue.
-    let mut r0 = 0.0f32;
-    let mut r1 = 0.0f32;
-    for i in 1..n {
-        r0 += mono[i] * mono[i];
-        r1 += mono[i] * mono[i - 1];
-    }
+    // Lag-1 autocorrelation: near +1 is a smooth low-pass signal (voiced
+    // speech, bass-heavy tone), near 0 is broadband/noise-like.
     let lag1_corr = if r0 > 1e-12 { (r1 / r0).clamp(-1.0, 1.0) } else { 0.0 };
-
-    // --- Zero-crossing rate ------------------------------------------------
-    // Crossings per sample: low for voiced speech / bass, high for noisy or
-    // bright (high-frequency) content. A cheap brightness proxy.
-    let mut zc = 0usize;
-    for i in 1..n {
-        if (mono[i] >= 0.0) != (mono[i - 1] >= 0.0) {
-            zc += 1;
-        }
-    }
+    // Zero-crossings per sample: low for voiced/bass, high for bright/noisy.
     let zcr = zc as f32 / n as f32;
 
     // --- Recommended bandwidth ---------------------------------------------
@@ -220,7 +214,10 @@ mod tests {
             a.music_probability
         );
         assert!(
-            matches!(a.detected_bandwidth, Bandwidth::NarrowBand | Bandwidth::MediumBand | Bandwidth::WideBand),
+            matches!(
+                a.detected_bandwidth,
+                Bandwidth::NarrowBand | Bandwidth::MediumBand | Bandwidth::WideBand
+            ),
             "speech bandwidth {:?}",
             a.detected_bandwidth
         );
@@ -229,10 +226,7 @@ mod tests {
     #[test]
     fn bright_broadband_reads_as_music() {
         // Strong content up to 15 kHz - fullband music.
-        let pcm = tone(
-            &[(220.0, 0.3), (3000.0, 0.3), (9000.0, 0.35), (15000.0, 0.3)],
-            960,
-        );
+        let pcm = tone(&[(220.0, 0.3), (3000.0, 0.3), (9000.0, 0.35), (15000.0, 0.3)], 960);
         let a = analyze_frame(&pcm, 1);
         assert!(
             a.music_probability > 0.55,
