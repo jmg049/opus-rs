@@ -44,8 +44,6 @@ mod encoder;
 #[cfg(feature = "std")]
 mod multistream;
 #[cfg(feature = "std")]
-pub mod prof;
-#[cfg(feature = "std")]
 pub use decoder::{OggDecodeError, OpusDecoder, decode_ogg_opus};
 #[cfg(feature = "std")]
 pub use encoder::{EncodeError, OpusEncoder, encode_ogg_opus};

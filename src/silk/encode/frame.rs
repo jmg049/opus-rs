@@ -171,7 +171,6 @@ impl SilkChannelEncoder {
         // Voice-activity analysis: speech-activity, spectral tilt and per-band
         // input quality, which tune the pitch threshold, noise shaping and gains.
         let vad = {
-            let _g = crate::prof::scope("silk:vad");
             self.vad.get_sa_q8(input, frame_length, self.fs_khz)
         };
 
@@ -210,7 +209,6 @@ impl SilkChannelEncoder {
         let mut res = core::mem::take(&mut self.scratch_res);
         res.clear();
         res.resize(buf_len, 0.0);
-        let _pl_g = crate::prof::scope("silk:find_pitch_lags");
         let pl = find_pitch_lags(
             &pitch_x_buf,
             &mut res,
@@ -225,7 +223,6 @@ impl SilkChannelEncoder {
             vad.input_tilt_q15,
             &mut self.ltp_corr,
         );
-        drop(_pl_g);
         let is_voiced = pl.voicing == 0;
         let signal_type = if is_voiced { TYPE_VOICED } else { TYPE_UNVOICED };
         let pitch_l = pl.pitch_l;
@@ -265,7 +262,6 @@ impl SilkChannelEncoder {
             pitch_l,
         };
         let shp = {
-            let _g = crate::prof::scope("silk:noise_shape");
             noise_shape_analysis(&mut self.shape, &shape_cfg, &res_f, &x_buf)
         };
 
@@ -292,7 +288,6 @@ impl SilkChannelEncoder {
             // LTP correlation + gain VQ on the whitened residual.
             let mut xx = vec![0.0f32; self.nb_subfr * LTP_ORDER * LTP_ORDER];
             let mut x_x = vec![0.0f32; self.nb_subfr * LTP_ORDER];
-            let _g = crate::prof::scope("silk:find_ltp");
             find_ltp(
                 &res,
                 ltp_mem_length,
@@ -302,9 +297,7 @@ impl SilkChannelEncoder {
                 &mut xx,
                 &mut x_x,
             );
-            drop(_g);
             let g = {
-                let _g = crate::prof::scope("silk:quant_ltp_gains");
                 quant_ltp_gains(&xx, &x_x, subfr_length as i32, self.nb_subfr, &mut self.sum_log_gain_q7)
             };
             ltp_coef = g.b_q14;
@@ -355,7 +348,6 @@ impl SilkChannelEncoder {
         // then the Q12 LPC the decoder rebuilds.
         let mut lpc = [0.0f32; MAX_LPC_ORDER];
         {
-            let _g = crate::prof::scope("silk:burg");
             burg_modified(
                 &mut lpc[..order],
                 &lpc_in_pre,
@@ -529,7 +521,6 @@ impl SilkChannelEncoder {
                 gains_indices = gi;
             }
 
-            let _nsq_g = crate::prof::scope("silk:nsq");
             nsq(
                 &mut self.nsq,
                 &cfg,
@@ -550,7 +541,6 @@ impl SilkChannelEncoder {
                 lambda_q10,
                 ltp_scale_q14,
             );
-            drop(_nsq_g);
             indices.gains_indices[..self.nb_subfr].copy_from_slice(&gains_indices[..self.nb_subfr]);
             indices.quant_offset_type = quant_offset_type as i8;
             encode_indices(

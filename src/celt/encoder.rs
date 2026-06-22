@@ -238,7 +238,6 @@ impl CeltEncoder {
         // no-op once it is the right length, so no per-frame zeroing.
         let mut inputs = core::mem::take(&mut self.scratch_inputs);
         inputs.resize(in_len * channels, 0.0);
-        let _pe_g = crate::prof::scope("celt:preemph");
         for c in 0..channels {
             let input = &mut inputs[c * in_len..(c + 1) * in_len];
             input[..OVERLAP].copy_from_slice(&self.in_mem[c]);
@@ -250,14 +249,12 @@ impl CeltEncoder {
             }
             self.preemph_mem[c] = mem;
         }
-        drop(_pe_g);
 
         // Pitch pre-filter: estimate the pitch, comb-filter `inputs` in place
         // to whiten the harmonic structure, and return the decision to code.
         // Runs before the transient analysis and MDCT, which both see the
         // filtered signal (matching the reference order).
         let (pf_on, pitch_index, qg) = {
-            let _g = crate::prof::scope("celt:prefilter");
             self.prefilter_analysis(&mut inputs, in_len, n, channels, nb_bytes)
         };
 
@@ -269,7 +266,6 @@ impl CeltEncoder {
 
         // Transient decision (`transient_analysis`); the flag needs 3 bits.
         let (is_transient, tf_estimate, tf_chan) = if lm > 0 && enc.tell() + 3 <= total_bits {
-            let _g = crate::prof::scope("celt:transient");
             transient_analysis(&inputs, in_len, channels)
         } else {
             (false, 0.0, 0)
@@ -284,7 +280,6 @@ impl CeltEncoder {
         let mut band_e = [[0.0f32; NB_EBANDS]; 2];
         let mut band_log_e = [[0.0f32; NB_EBANDS]; 2];
         let mut band_log_e2 = [[0.0f32; NB_EBANDS]; 2];
-        let _mdct_g = crate::prof::scope("celt:mdct+bandE");
         let mut freq = core::mem::take(&mut self.scratch_freq);
         freq.resize(n, 0.0);
         for c in 0..channels {
@@ -335,9 +330,7 @@ impl CeltEncoder {
         // Dynalloc analysis (uses the previous frame's energies, so it must
         // run before coarse-energy quantisation overwrites them); yields the
         // boost targets plus the importance/spread weights for tf and spread.
-        drop(_mdct_g);
         let dyn_an = {
-            let _g = crate::prof::scope("celt:dynalloc");
             dynalloc_analysis(
                 &band_log_e,
                 &band_log_e2,
@@ -356,7 +349,6 @@ impl CeltEncoder {
         // low byte threshold. The result is the raw 0/1 flags plus tf_select.
         let n0 = n;
         let (mut tf_res, tf_select) = if nb_bytes >= 15 * channels && lm > 0 && self.complexity >= 2 {
-            let _g = crate::prof::scope("celt:tf_analysis");
             let lambda = 80.max(20480 / nb_bytes as i32 + 2);
             tf_analysis(
                 end,
@@ -429,7 +421,6 @@ impl CeltEncoder {
         // Coarse energy.
         let mut error = [[0.0f32; NB_EBANDS]; 2];
         {
-            let _g = crate::prof::scope("celt:coarse_energy");
             self.quant_coarse_energy(enc, start, end, &band_log_e, &mut error, intra, lm, total_bits);
         }
 
@@ -478,7 +469,6 @@ impl CeltEncoder {
             let s = if self.complexity == 0 {
                 Spread::None as i32
             } else {
-                let _g = crate::prof::scope("celt:spreading");
                 spreading_decision(
                     &x,
                     n0,
@@ -626,7 +616,6 @@ impl CeltEncoder {
         // Band shapes.
         let total = ((nb_bytes * 8) << 3) as i32 - anti_collapse_rsv;
         let (xs, ys) = x.split_at_mut(n);
-        let _qb_g = crate::prof::scope("celt:quant_all_bands");
         quant_all_bands_enc(
             enc,
             start,
@@ -746,15 +735,10 @@ impl CeltEncoder {
         let enabled = nb_bytes > 12 * channels && self.complexity >= 5;
         let (pitch_index, mut gain1) = if enabled {
             let refs: Vec<&[f32]> = pre[..channels].iter().map(Vec::as_slice).collect();
-            let _ds = crate::prof::scope("celt:pf_downsample");
             let x_lp = pitch_downsample(&refs, pre_len);
-            drop(_ds);
             let max_pitch = COMBFILTER_MAXPERIOD - 3 * COMBFILTER_MINPERIOD;
-            let _ps = crate::prof::scope("celt:pf_search");
             let coarse = pitch_search(&x_lp[COMBFILTER_MAXPERIOD >> 1..], &x_lp, n, max_pitch);
-            drop(_ps);
             let mut pitch_index = COMBFILTER_MAXPERIOD - coarse;
-            let _rd = crate::prof::scope("celt:pf_doubling");
             let (gain, refined) = remove_doubling(
                 &x_lp,
                 COMBFILTER_MAXPERIOD,
@@ -764,7 +748,6 @@ impl CeltEncoder {
                 self.prefilter_period,
                 self.prefilter_gain,
             );
-            drop(_rd);
             pitch_index = refined.min(COMBFILTER_MAXPERIOD - 2);
             (pitch_index, 0.7 * gain)
         } else {
