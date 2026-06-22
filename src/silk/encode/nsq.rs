@@ -130,22 +130,32 @@ fn short_prediction(buf: &[i32], base: usize, coef_rev: &[i16]) -> i32 {
 
 /// `silk_NSQ_noise_shape_feedback_loop`: AR shaping with the shift-register
 /// state `data1` (`sAR2_Q14`), driven by the new sample `data0`. Returns Q12.
+///
+/// Mirrors libopus's `silk_NSQ_noise_shape_feedback_loop_c`: the right-shift of
+/// the AR state (prepend `data0`, drop the last tap) is fused with the dot in a
+/// single in-place pass using two rolling temporaries - no scratch array and no
+/// `copy_from_slice`. The accumulation order (`coef[0]·data0`, then
+/// `coef[k]·old_state[k-1]` ascending) is identical to the materialise-then-dot
+/// form, so it stays bit-exact. `order` is always even for SILK shaping.
 fn noise_shape_feedback_loop(data0: i32, data1: &mut [i32], coef: &[i16], order: usize) -> i32 {
-    // The reference fuses a right-shift of the AR state with the dot product:
-    // the new state is `data0` prepended and the last tap dropped, and the
-    // output is `Σ new_state[k]·coef[k]`. Materialise the shifted state, take
-    // the fixed-point SIMD dot (bit-identical to the SMLAWB chain), write back.
-    let mut shifted = [0i32; MAX_SHAPE_LPC_ORDER];
-    shifted[0] = data0;
-    shifted[1..order].copy_from_slice(&data1[..order - 1]);
-    // Short (≤16-tap) per-sample dot - scalar beats the SIMD kernel here.
-    // Zip `shifted[..order]` with `coef` (both `order` long) to drop the
-    // per-tap bounds checks.
+    debug_assert!(order >= 2 && order & 1 == 0 && order <= data1.len() && order <= coef.len());
+    let mut tmp2 = data0;
+    let mut tmp1 = data1[0];
+    data1[0] = tmp2;
     let mut out = (order >> 1) as i32;
-    for (&s, &c) in shifted[..order].iter().zip(coef.iter()) {
-        out = smlawb(out, s, i32::from(c));
+    out = smlawb(out, tmp2, i32::from(coef[0]));
+    let mut j = 2;
+    while j < order {
+        tmp2 = data1[j - 1];
+        data1[j - 1] = tmp1;
+        out = smlawb(out, tmp1, i32::from(coef[j - 1]));
+        tmp1 = data1[j];
+        data1[j] = tmp2;
+        out = smlawb(out, tmp2, i32::from(coef[j]));
+        j += 2;
     }
-    data1[..order].copy_from_slice(&shifted[..order]);
+    data1[order - 1] = tmp1;
+    out = smlawb(out, tmp1, i32::from(coef[order - 1]));
     out << 1
 }
 
