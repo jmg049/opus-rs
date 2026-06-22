@@ -7,8 +7,6 @@
 //! prediction gain, so the resulting synthesis filter is guaranteed stable.
 //! The accumulators are `f64` to match the reference's `double` precision.
 
-extern crate alloc;
-use alloc::vec;
 
 /// Conditioning factor added to the zero-lag autocorrelation
 /// (`FIND_LPC_COND_FAC`), regularising the solve.
@@ -48,23 +46,26 @@ pub(crate) fn burg_modified(
     assert!(x.len() >= nb_subfr * subfr_length && subfr_length > d);
     let min_inv_gain = f64::from(min_inv_gain);
 
-    // Autocorrelations summed over the subframes.
+    // Autocorrelations summed over the subframes. The work vectors are bounded
+    // by the maximum LPC order (24), so keep them on the stack - burg runs once
+    // per frame and the heap vectors showed up in the profile.
+    const MAXD: usize = 24;
     let c0 = energy(&x[..nb_subfr * subfr_length]);
-    let mut c_first_row = vec![0.0f64; d];
+    let mut c_first_row = [0.0f64; MAXD];
     for s in 0..nb_subfr {
         let xs = &x[s * subfr_length..];
         for n in 1..=d {
             c_first_row[n - 1] += inner_product(xs, &xs[n..], subfr_length - n);
         }
     }
-    let mut c_last_row = c_first_row.clone();
+    let mut c_last_row = c_first_row;
 
-    let mut caf = vec![0.0f64; d + 1];
-    let mut cab = vec![0.0f64; d + 1];
+    let mut caf = [0.0f64; MAXD + 1];
+    let mut cab = [0.0f64; MAXD + 1];
     caf[0] = c0 + FIND_LPC_COND_FAC * c0 + 1e-9;
     cab[0] = caf[0];
 
-    let mut af = vec![0.0f64; d];
+    let mut af = [0.0f64; MAXD];
     let mut inv_gain = 1.0f64;
     let mut reached_max_gain = false;
 
