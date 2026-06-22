@@ -1,27 +1,23 @@
 //! Signal analysis driving the encoder's mode/bandwidth decision.
 //!
-//! libopus's real `run_analysis` (analysis.c) runs an MLP tonality model over a
-//! sliding MDCT to produce a music-probability and a recommended bandwidth. We
-//! are **not** required to match its decisions bit-for-bit - only the *decoder*
-//! is conformance-normative, so any mode/bandwidth choice that produces a valid,
-//! round-tripping Opus packet is correct. This module therefore implements a
-//! lighter-weight, fully documented analysis from the 48 kHz time-domain frame:
+//! Only the decoder is conformance-normative, so any mode/bandwidth choice that
+//! produces a valid, round-tripping Opus packet is correct. This module derives
+//! the choice from a light-weight, FFT-free analysis of the 48 kHz time-domain
+//! frame (keeping the core crate dependency-free):
 //!
-//! * a 6-band energy split (the same band edges libopus's bandwidth detector
-//!   keys off: ~4 / 6 / 8 / 12 kHz) computed with cheap one-pole/one-zero
-//!   filters, no FFT, keeping the core crate dependency-free;
-//! * a **spectral tilt** (low-band vs high-band energy ratio) - speech rolls off
+//! * a 6-band energy split (band edges ~4 / 6 / 8 / 12 kHz) from cheap one-pole
+//!   filters;
+//! * a spectral tilt (low-band vs high-band energy ratio): speech rolls off
 //!   steeply above ~4 kHz, music keeps energy up to 20 kHz;
-//! * a **tonality** estimate from the normalised one-lag autocorrelation - a
-//!   high lag-1 correlation means a smooth, low-pass (voiced/tonal) signal, a
-//!   low one means broadband/noisy content;
-//! * a **zero-crossing rate**, a classic cheap voiced/unvoiced and
-//!   low/high-frequency proxy.
+//! * a tonality estimate from the normalised one-lag autocorrelation: a high
+//!   lag-1 correlation means a smooth, low-pass (voiced/tonal) signal, a low one
+//!   means broadband/noisy content;
+//! * a zero-crossing rate, a cheap voiced/unvoiced and low/high-frequency proxy.
 //!
 //! These combine into [`FrameAnalysis::music_probability`] (0 = clearly speech,
 //! 1 = clearly music) and a recommended [`Bandwidth`] from where the signal's
-//! energy actually dies out. The encoder smooths the probability across frames
-//! (hysteresis) so the mode does not flip every frame.
+//! energy dies out. The encoder smooths the probability across frames
+//! (hysteresis) so the mode does not flip on a single borderline frame.
 
 use crate::packet::Bandwidth;
 
