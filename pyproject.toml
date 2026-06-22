@@ -54,3 +54,15 @@ test = ["pytest>=7.4.0", "numpy>=1.22"]
 # `extension-module` and `abi3-py39` ride along via that feature (see Cargo.toml).
 features = ["python"]
 module-name = "opus_native"
+
+[tool.uv]
+# Rebuild the compiled extension whenever the Rust sources or manifests change.
+# Without this uv keys its build cache on the package version alone, so after
+# editing src/**/*.rs (e.g. adding encoder constructor arguments) `uv run` would
+# reinstall a stale cached wheel instead of recompiling.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]
