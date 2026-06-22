@@ -101,19 +101,29 @@ the MDCT, where libopus's SIMD still wins.
 `set_complexity`); the only fair comparison is at *matched* complexity, so each
 column runs `opus_native` and libopus at the **same** setting:
 
+Measured pinned to a single performance core (the test machine is a hybrid
+P/E-core CPU; unpinned runs migrate between core types and are not reproducible):
+
 | Mode | ours c0 | libopus c0 | ours / lib | ours c10 | libopus c10 | ours / lib |
 |------|---------|-----------|-----------|----------|-------------|-----------|
-| SILK wideband 16 kb/s | 642× | 741× | 0.87× | 635× | 214× | **2.97×** |
-| hybrid fullband 32 kb/s | 500× | 555× | 0.90× | 397× | 192× | **2.06×** |
-| CELT fullband 64 kb/s | 1084× | 1090× | **0.99×** | 689× | 438× | **1.57×** |
+| SILK wideband 16 kb/s | 734× | 743× | **0.99×** | 705× | 220× | **3.20×** |
+| hybrid fullband 32 kb/s | 556× | 561× | **0.99×** | 423× | 194× | **2.18×** |
+| CELT fullband 64 kb/s | 1087× | 1093× | **0.99×** | 697× | 437× | **1.59×** |
 
-At matched complexity-0 we're at parity (CELT 0.99×) to within ~10%; at matched
-complexity-10 we're 1.6-3× faster. (libopus's c10 also enables delayed-decision
-NSQ and warped noise shaping, which `opus_native` does not yet implement, so its
-c10 buys quality we don't spend cycles on - the c0 column is the cleaner
-like-for-like.) This followed SIMD (AVX2+FMA / SSE2) of the encoder's hot loops
-plus general tuning - latency-hiding in the dot kernels, and reverting SIMD
-where a scalar loop measured faster *in cycles* (not instruction counts):
+At matched complexity-0 we're at **parity** (all modes 0.99×, within measurement
+noise); at matched complexity-10 we're 1.6-3.2× faster. (libopus's c10 also
+enables delayed-decision NSQ and warped noise shaping, which `opus_native` does
+not yet implement, so its c10 buys quality we don't spend cycles on - the c0
+column is the cleaner like-for-like.) Closing SILK/hybrid from ~0.87-0.90× to
+parity came from profiling `opus_native` against libopus 1.6.1 *function for
+function* (perf with libopus's debuginfo, pinned to one core), then matching its
+hot paths: a table-driven rate-distortion choice in the NSQ inner loop (a port of
+`silk_NSQ_sse4_1`'s `table[64][4]`, bit-exact), and compiler-unrolled per-order
+LPC analysis filters (libopus dispatches to `silk_LPC_analysis_filterN_FLP`; a
+generic SIMD dot per output sample lost to the per-call horizontal fold). Earlier
+work did SIMD (AVX2+FMA / SSE2) of the hot loops plus general tuning -
+latency-hiding in the dot kernels, and reverting SIMD where a scalar loop
+measured faster *in cycles* (not instruction counts):
 
 - **CELT**: the PVQ pulse search (SSE2 *and* an AVX2 path libopus doesn't ship);
   the pre-filter pitch analysis (`celt_pitch_xcorr` + downsampler whitening,
@@ -126,11 +136,14 @@ where a scalar loop measured faster *in cycles* (not instruction counts):
   NSQ prediction filters, with a bit-exact fixed-point SIMD dot so the bitstream
   is unchanged.
 
-The remaining gap to complexity-0 is genuinely serial or fixed-point work the
-reference also runs scalar - pre-emphasis, the transient detector's IIR filters,
-the NSQ rate-distortion loop, the NLSF delayed-decision VQ, and the MDCT post-
-rotation (a scatter-write the float build can't vectorise without AVX-512). Every
-mode encodes and decodes at hundreds of × realtime.
+At matched complexity the two are now neck and neck: several stages
+(`opus_native`'s input resampler, the pitch decimation, the range coder) already
+run faster than libopus's, and the NSQ and pitch analysis are at parity. What is
+left is genuinely serial, fixed-point work the reference also runs scalar - the
+NSQ rate-distortion recurrence, pre-emphasis, the transient detector's IIR
+filters - plus the float-correlation dot products, where both use the same
+4-wide widening FMA kernel. Every mode encodes and decodes at hundreds of ×
+realtime.
 
 ## Conformance
 
