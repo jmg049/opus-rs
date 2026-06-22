@@ -1,5 +1,4 @@
-//! Band shape decoding (RFC 6716 §4.3.4; normative `bands.c`, float build,
-//! decoder paths only).
+//! Band shape decoding (RFC 6716 §4.3.4; decoder paths only).
 //!
 //! [`quant_all_bands`] walks the coded bands, converting each band's bit
 //! budget into PVQ pulses via recursive splitting: large partitions are halved
@@ -1022,8 +1021,7 @@ pub fn anti_collapse(
     }
 }
 
-/// `2^x` for the anti-collapse gains (the reference float build's
-/// `celt_exp2`).
+/// `2^x` for the anti-collapse gains.
 fn libm_exp2(x: f32) -> f32 {
     (core::f64::consts::LN_2 * f64::from(x)).exp() as f32
 }

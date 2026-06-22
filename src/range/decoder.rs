@@ -264,8 +264,8 @@ impl<'a> RangeDecoder<'a> {
     /// intervening bits had been consumed, without reading them.
     ///
     /// Used by the CELT silence path, which "pretends to have read all the
-    /// remaining bits" (RFC 6716 §4.3, reference `celt_decode_with_ec`) so
-    /// downstream budget checks behave identically to the reference.
+    /// remaining bits" (RFC 6716 §4.3) so downstream budget checks behave
+    /// as required.
     #[cfg(feature = "std")]
     pub(crate) fn force_tell(&mut self, bits: u32) {
         let current = self.tell();
@@ -277,8 +277,7 @@ impl<'a> RangeDecoder<'a> {
         }
     }
 
-    /// Truncates the buffer to `new_len` bytes (`dec.storage -=
-    /// redundancy_bytes` in `opus_decoder.c`): an embedded redundant frame
+    /// Truncates the buffer to `new_len` bytes: an embedded redundant frame
     /// occupies the tail, and subsequent raw bits must not read into it.
     ///
     /// # Panics

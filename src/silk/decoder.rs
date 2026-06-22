@@ -1,5 +1,5 @@
 //! The SILK channel decoder state and synthesis core (RFC 6716 §4.2.7.8-
-//! 4.2.7.9; normative `decode_core.c`, state from `structs.h`).
+//! 4.2.7.9).
 //!
 //! [`SilkChannelDecoder::decode_core`] is the inverse NSQ operation: the
 //! pulse excitation is offset/sign-randomised into Q14, voiced subframes
@@ -28,19 +28,18 @@ pub(crate) const MAX_SUB_FRAME_LENGTH: usize = 80;
 pub(crate) const LTP_MEM_LENGTH_MS: usize = 20;
 /// `QUANT_LEVEL_ADJUST_Q10`.
 const QUANT_LEVEL_ADJUST_Q10: i32 = 80;
-/// `silk_RAND` constants (`RAND_MULTIPLIER`, `RAND_INCREMENT`).
+/// Pseudorandom generator constants (`RAND_MULTIPLIER`, `RAND_INCREMENT`).
 const RAND_MULTIPLIER: i32 = 196_314_165;
 const RAND_INCREMENT: i32 = 907_633_515;
 
-/// `silk_RAND`.
+/// Linear-congruential pseudorandom generator used by the excitation.
 #[inline]
 #[must_use]
 pub(crate) const fn silk_rand(seed: i32) -> i32 {
     RAND_INCREMENT.wrapping_add(seed.wrapping_mul(RAND_MULTIPLIER))
 }
 
-/// Per-channel decoder state (`silk_decoder_state`, decode-relevant
-/// fields).
+/// Per-channel decoder state (decode-relevant fields).
 pub(crate) struct SilkChannelDecoder {
     /// Internal rate in kHz (8, 12 or 16).
     pub fs_khz: i32,
@@ -54,19 +53,19 @@ pub(crate) struct SilkChannelDecoder {
     pub ltp_mem_length: usize,
     /// LPC order (10 for NB/MB, 16 for WB).
     pub lpc_order: usize,
-    /// Synthesis history (`outBuf`).
+    /// Synthesis history.
     pub out_buf: [i16; MAX_FRAME_LENGTH + 2 * MAX_SUB_FRAME_LENGTH],
-    /// LPC filter state (`sLPC_Q14_buf`).
+    /// LPC filter state.
     pub slpc_q14_buf: [i32; MAX_LPC_ORDER],
-    /// Excitation (`exc_Q14`).
+    /// Excitation.
     pub exc_q14: [i32; MAX_FRAME_LENGTH],
-    /// `prev_gain_Q16`.
+    /// Previous subframe gain (Q16).
     pub prev_gain_q16: i32,
-    /// `lagPrev`.
+    /// Previous pitch lag.
     pub lag_prev: i32,
-    /// `lossCnt`.
+    /// Consecutive lost-frame count.
     pub loss_cnt: i32,
-    /// `prevSignalType`.
+    /// Signal type of the previous frame.
     pub prev_signal_type: i32,
     /// Decoded side information of the current frame.
     pub indices: SideInfoIndices,
@@ -74,15 +73,14 @@ pub(crate) struct SilkChannelDecoder {
     pub ec_prev: EcPrevState,
     /// Parameter-stage history (gain index, previous NLSFs, reset flag).
     pub params: ParamState,
-    /// Concealment state (`sPLC`).
+    /// Concealment state.
     pub plc: super::plc::PlcState,
-    /// Comfort-noise state (`sCNG`).
+    /// Comfort-noise state.
     pub cng: super::plc::CngState,
 }
 
 impl SilkChannelDecoder {
-    /// Creates a decoder for the given internal rate and frame duration
-    /// (`silk_decoder_set_fs` reset semantics).
+    /// Creates a decoder for the given internal rate and frame duration.
     pub fn new(fs_khz: i32, nb_subfr: usize) -> Self {
         debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
         debug_assert!(nb_subfr == 2 || nb_subfr == 4);
@@ -118,7 +116,7 @@ impl SilkChannelDecoder {
     }
 
     /// Resets the side-channel prediction memory for the first coded side
-    /// frame after a mid-only stretch (`dec_API.c`).
+    /// frame after a mid-only stretch.
     pub fn reset_side_prediction(&mut self) {
         self.out_buf.fill(0);
         self.slpc_q14_buf.fill(0);
@@ -128,11 +126,11 @@ impl SilkChannelDecoder {
         self.params.first_frame_after_reset = true;
     }
 
-    /// `silk_decode_frame` (normal decode path): side information,
-    /// excitation, parameters, synthesis, and history update for one frame.
+    /// Normal decode path: side information, excitation, parameters,
+    /// synthesis, and history update for one frame.
     ///
     /// Packet-loss concealment and comfort-noise state updates are not yet
-    /// ported; they only affect output after lost packets, never a
+    /// implemented; they only affect output after lost packets, never a
     /// loss-free decode.
     pub fn decode_frame(
         &mut self,
@@ -183,7 +181,7 @@ impl SilkChannelDecoder {
         self.lag_prev = ctrl.pitch_l[self.nb_subfr - 1];
     }
 
-    /// `silk_decode_frame` for a lost packet: concealment, history update,
+    /// Decode path for a lost packet: concealment, history update,
     /// comfort noise, and state bookkeeping.
     pub fn decode_frame_lost(&mut self, xq: &mut [i16]) {
         debug_assert!(xq.len() >= self.frame_length);
@@ -200,12 +198,12 @@ impl SilkChannelDecoder {
         self.lag_prev = ctrl.pitch_l[self.nb_subfr - 1];
     }
 
-    /// `silk_decode_core`: excitation → LTP → LPC synthesis for one frame;
-    /// writes `frame_length` samples into `xq`.
+    /// Excitation → LTP → LPC synthesis for one frame; writes
+    /// `frame_length` samples into `xq`.
     #[allow(
         clippy::needless_range_loop,
         clippy::explicit_counter_loop,
-        reason = "the loops mirror the reference decode_core sequence index-for-index"
+        reason = "the loops mirror the synthesis sequence index-for-index"
     )]
     pub fn decode_core(&mut self, ctrl: &mut DecoderControl, xq: &mut [i16], pulses: &[i16]) {
         debug_assert!(self.prev_gain_q16 != 0);
@@ -374,10 +372,9 @@ mod tests {
     use super::super::params::DecoderControl;
     use super::*;
 
-    /// Pins generated by compiling the reference decode_core.c and driving
-    /// it with this exact hand-built state: a voiced frame (rewhitening,
-    /// LTP, per-subframe gain changes) followed by an unvoiced frame
-    /// (state carry, gain adjustment).
+    /// Reference pins driven with this exact hand-built state: a voiced
+    /// frame (rewhitening, LTP, per-subframe gain changes) followed by an
+    /// unvoiced frame (state carry, gain adjustment).
     #[test]
     fn decode_core_matches_reference_pins() {
         let mut dec = SilkChannelDecoder::new(8, 4);

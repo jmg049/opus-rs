@@ -1,5 +1,5 @@
-//! The multistream decoder (RFC 7845 §5.1.1 layouts; normative
-//! `opus_multistream_decoder.c`): N elementary Opus streams per packet -
+//! The multistream decoder (RFC 7845 §5.1.1 layouts): N elementary Opus
+//! streams per packet -
 //! the first `coupled` decoded as stereo, the rest mono - routed to output
 //! channels through a mapping table. All streams but the last use
 //! self-delimited framing (RFC 6716 Appendix B).
@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use crate::decoder::OpusDecoder;
 use crate::packet::{Packet, PacketError};
 
-/// A multistream Opus decoder (`OpusMSDecoder`).
+/// A multistream Opus decoder.
 pub struct MultistreamDecoder {
     decoders: Vec<OpusDecoder>,
     channels: usize,
@@ -22,8 +22,7 @@ pub struct MultistreamDecoder {
 impl MultistreamDecoder {
     /// Creates a decoder for `streams` elementary streams (the first
     /// `coupled` stereo) mapped onto `mapping.len()` output channels;
-    /// `mapping[ch]` selects a decoded channel index or 255 for silence
-    /// (`opus_multistream_decoder_create`).
+    /// `mapping[ch]` selects a decoded channel index or 255 for silence.
     ///
     /// # Panics
     ///
@@ -56,7 +55,7 @@ impl MultistreamDecoder {
     }
 
     /// Decodes one multistream packet to interleaved f32 at the decoder
-    /// rate (`opus_multistream_decode`).
+    /// rate.
     ///
     /// # Errors
     ///

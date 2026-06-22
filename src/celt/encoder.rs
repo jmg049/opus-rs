@@ -1,5 +1,4 @@
-//! A CELT encoder (RFC 6716 §5.3; normative `celt_encoder.c`,
-//! `quant_bands.c` encoder paths): mono or stereo, with transient
+//! A CELT encoder (RFC 6716 §5.3): mono or stereo, with transient
 //! detection and short blocks.
 //!
 //! The encoder now runs the full analysis chain - transient detection and
@@ -107,7 +106,7 @@ pub struct CeltEncoder {
     scratch_pre: [Vec<f32>; 2],
     /// Encode complexity 0-10; gates the pre-filter pitch search (≥5), tf
     /// analysis (≥2), the second transient MDCT (≥8), the two-pass coarse
-    /// energy (≥4) and spreading (none at 0), matching libopus.
+    /// energy (≥4) and spreading (none at 0).
     complexity: u8,
 }
 
@@ -1061,7 +1060,7 @@ fn transient_analysis(inputs: &[f32], len: usize, channels: usize) -> (bool, f32
 /// MDCT overlap (windowed), then constant. `src` is the *unfiltered* history
 /// plus the new samples, so this is non-recursive (unlike the decoder's
 /// in-place post-filter). Gains are passed negated by the caller.
-#[allow(clippy::too_many_arguments, reason = "mirrors the reference comb_filter signature")]
+#[allow(clippy::too_many_arguments, reason = "mirrors the reference comb-filter signature")]
 fn comb_filter_prefilter(
     dst: &mut [f32],
     src: &[f32],

@@ -1,5 +1,4 @@
-//! The CELT low-overlap MDCT (RFC 6716 §4.3.7; normative `mdct.c`, float
-//! build).
+//! The CELT low-overlap MDCT (RFC 6716 §4.3.7).
 //!
 //! This is *not* a generic 50%-overlap MDCT: CELT windows only the first and
 //! last `overlap` (=120) samples of each block with the Vorbis power window

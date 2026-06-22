@@ -1,5 +1,4 @@
-//! Linear-prediction analysis for the SILK encoder (RFC 6716 §5.2.3;
-//! normative `silk/float/burg_modified_FLP.c`).
+//! Linear-prediction analysis for the SILK encoder (RFC 6716 §5.2.3).
 //!
 //! [`burg_modified`] is Burg's method, modified as in the reference: it
 //! computes short-term prediction coefficients from the signal (summed over
@@ -21,7 +20,7 @@ fn inner_product(a: &[f32], b: &[f32], n: usize) -> f64 {
     crate::simd::dot_f64(&a[..n], b)
 }
 
-/// Burg's method, modified (`silk_burg_modified_FLP`).
+/// Burg's method, modified.
 ///
 /// Fills `a` (length `d`) with the short-term prediction coefficients and
 /// returns the residual energy. `x` holds `nb_subfr` subframes of

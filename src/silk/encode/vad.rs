@@ -1,5 +1,4 @@
-//! Voice activity detection for the SILK encoder (RFC 6716 §5.2; normative
-//! `silk/VAD.c`).
+//! Voice activity detection for the SILK encoder (RFC 6716 §5.2).
 //!
 //! [`VadState::get_sa_q8`] produces the speech-activity probability
 //! (`speech_activity_Q8`, 0-255), the spectral-tilt measure
@@ -9,8 +8,7 @@
 //! half-band analysis filters, tracks a per-band noise-floor estimate, and
 //! maps the per-band signal-to-noise ratios through sigmoids.
 //!
-//! Fixed-point throughout, mirroring `silk_VAD_GetSA_Q8_c`; carries the
-//! cross-frame noise-estimation state.
+//! Fixed-point throughout; carries the cross-frame noise-estimation state.
 
 extern crate alloc;
 
@@ -298,7 +296,7 @@ impl VadState {
 mod tests {
     use super::*;
 
-    /// Bit-exact pin against the compiled reference `silk_VAD_GetSA_Q8` over a
+    /// Bit-exact pin against the reference over a
     /// five-frame sequence (so the noise-estimation state evolves).
     #[test]
     fn vad_matches_reference_pin() {

@@ -1,5 +1,5 @@
 //! PVQ codeword enumeration - "coding with replacement and signs"
-//! (RFC 6716 §4.3.4.2; normative reference `cwrs.c`).
+//! (RFC 6716 §4.3.4.2).
 //!
 //! CELT codes each band's normalized shape as an N-dimensional vector of K
 //! signed unit pulses, transmitted as a single uniformly distributed integer
@@ -11,8 +11,7 @@
 //!   function, symmetric in its arguments and obeying
 //!   `U(N, K) = U(N-1, K) + U(N, K-1) + U(N-1, K-1)`.
 //!
-//! This ports the reference's **table-driven** fast path (the default,
-//! non-`SMALL_FOOTPRINT` build): the `U` rows live in a precomputed flat table
+//! This uses a **table-driven** fast path: the `U` rows live in a precomputed flat table
 //! (`CELT_PVQ_U_DATA`, 1272 `u32`, generated once from the recurrence on first
 //! use), so decoding/encoding a band is O(N) table lookups instead of the O(NK)
 //! on-the-fly recurrence - the dominant cost of CELT band decode. The table
@@ -78,7 +77,7 @@ fn urow(data: &[u32], row: usize, col: usize) -> u32 {
 }
 
 /// Decodes codeword index `i` into the pulse vector `y` (length `n`, `k`
-/// pulses), via the `U` table - the reference's fast `cwrsi()`.
+/// pulses), via the `U` table.
 fn cwrsi(n0: usize, k0: usize, mut i: u32, y: &mut [i32]) {
     debug_assert!(n0 > 1 && k0 > 0);
     let data = pvq_u_data();
@@ -221,8 +220,7 @@ pub fn encode_pulses(enc: &mut RangeEncoder, y: &[i32], k: usize) {
 mod tests {
     use super::*;
 
-    /// V(N, K) for N, K < 10, from the reference implementation's own
-    /// documentation table in `cwrs.c`.
+    /// V(N, K) for N, K < 10.
     const V_TABLE: [[u32; 10]; 10] = [
         [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         [1, 2, 2, 2, 2, 2, 2, 2, 2, 2],

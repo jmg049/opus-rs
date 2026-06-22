@@ -10,7 +10,8 @@
 //! and mid/side stereo helpers.
 //!
 //! It is **not** RFC 6716 Opus. Encoded frames are self-describing Rust
-//! structs, not Opus bitstreams; nothing here interoperates with libopus. As
+//! structs, not Opus bitstreams; nothing here interoperates with any Opus
+//! implementation. As
 //! the conformant SILK (§4.2) and CELT (§4.3) layers land, the pieces here are
 //! either superseded or absorbed into the real encoder's analysis stages
 //! ([`crate::lpc`] already serves both).

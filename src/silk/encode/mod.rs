@@ -1,4 +1,4 @@
-//! The SILK encoder (RFC 6716 §5.2; normative `silk/` and `silk/float/`).
+//! The SILK encoder (RFC 6716 §5.2).
 //!
 //! SILK is the speech/low-bitrate half of Opus. The full encode pipeline is
 //! assembled here - short-term (Burg LPC → NLSF VQ) and long-term (pitch +

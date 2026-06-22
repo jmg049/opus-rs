@@ -1,5 +1,4 @@
-//! The SILK decoder API layer (RFC 6716 §4.2.3-4.2.4; normative
-//! `dec_API.c`, `silk_Decode`).
+//! The SILK decoder API layer (RFC 6716 §4.2.3-4.2.4).
 //!
 //! One call decodes one 10 or 20 ms frame of a packet (packets carry up to
 //! three frames): the first call of a packet reads the per-frame VAD bits
@@ -23,7 +22,7 @@ use super::resampler::Resampler;
 use super::stereo::{StereoDecState, stereo_decode_mid_only, stereo_decode_pred, stereo_ms_to_lr};
 use super::tables::{LBRR_FLAGS_2_ICDF, LBRR_FLAGS_3_ICDF};
 
-/// `MAX_FRAMES_PER_PACKET`.
+/// Maximum number of frames per packet.
 const MAX_FRAMES_PER_PACKET: usize = 3;
 
 /// One channel: frame decoder, resampler, and per-packet flags.
@@ -36,7 +35,7 @@ struct ChannelState {
     lbrr_flags: [bool; MAX_FRAMES_PER_PACKET],
 }
 
-/// Per-call control (`silk_DecControlStruct`, decode-relevant fields).
+/// Per-call control (decode-relevant fields).
 #[derive(Debug, Clone, Copy)]
 pub struct DecControl {
     /// Channels coded in the bitstream (1 or 2).
@@ -51,7 +50,7 @@ pub struct DecControl {
     pub payload_size_ms: usize,
 }
 
-/// The SILK decoder for one Opus stream (`silk_decoder`).
+/// The SILK decoder for one Opus stream.
 pub struct SilkDecoder {
     channels: [Option<ChannelState>; 2],
     stereo: StereoDecState,
@@ -67,7 +66,7 @@ impl Default for SilkDecoder {
 }
 
 impl SilkDecoder {
-    /// `silk_InitDecoder`.
+    /// Create a new decoder.
     #[must_use]
     pub fn new() -> Self {
         SilkDecoder {
@@ -79,10 +78,9 @@ impl SilkDecoder {
         }
     }
 
-    /// `silk_Decode` (normal decode; loss concealment not ported): decodes
-    /// the next frame of the packet from `dec`, appending interleaved
-    /// output at the API rate to `out`. `new_packet` must be true on the
-    /// first call for each packet.
+    /// Normal decode: decodes the next frame of the packet from `dec`,
+    /// appending interleaved output at the API rate to `out`. `new_packet`
+    /// must be true on the first call for each packet.
     ///
     /// # Panics
     ///
@@ -93,9 +91,8 @@ impl SilkDecoder {
         self.decode_inner(dec, ctl, new_packet, false, out);
     }
 
-    /// `silk_Decode` with `FLAG_DECODE_LBRR`: decodes the in-band FEC
-    /// (LBRR) data of this packet for the frames that carry it, concealing
-    /// the rest.
+    /// Decodes the in-band FEC (LBRR) data of this packet for the frames
+    /// that carry it, concealing the rest.
     ///
     /// # Panics
     ///
@@ -288,9 +285,7 @@ impl SilkDecoder {
         for n in 0..ctl.channels_internal {
             if n == 0 || has_side {
                 // Independent coding when no previous frame is available.
-                // (The reference computes nFramesDecoded[0] - n AFTER
-                // channel 0's counter has been incremented, so both
-                // channels effectively see the pre-loop count.)
+                // Both channels effectively see the pre-loop frame count.
                 let frame_index = frames_decoded0 as i32;
                 let ch_lbrr = self.channels[n].as_ref().expect("configured").lbrr_flags;
                 let cond = if frame_index <= 0 {
@@ -370,9 +365,9 @@ impl SilkDecoder {
 }
 
 impl SilkDecoder {
-    /// `silk_Decode` with `FLAG_PACKET_LOST`: conceals one frame per call,
-    /// appending interleaved output at the API rate to `out`. The decoder
-    /// must have decoded at least one good packet.
+    /// Conceals one frame per call, appending interleaved output at the API
+    /// rate to `out`. The decoder must have decoded at least one good
+    /// packet.
     ///
     /// # Panics
     ///

@@ -1,5 +1,4 @@
-//! Fixed-point LPC coefficient utilities (normative `bwexpander_32.c`,
-//! `LPC_fit.c`, `LPC_inv_pred_gain.c`).
+//! Fixed-point LPC coefficient utilities.
 //!
 //! These keep the short-term predictor representable and stable:
 //! bandwidth expansion shrinks coefficients geometrically, `lpc_fit`
@@ -14,7 +13,7 @@ use super::math::{clz32, inverse32_var_q, mul, rshift_round, rshift_round64, smm
 /// `SILK_MAX_ORDER_LPC`.
 pub(crate) const SILK_MAX_ORDER_LPC: usize = 24;
 
-/// `silk_bwexpander_32`: chirps the AR filter `ar` by `chirp_q16`.
+/// Chirps the AR filter `ar` by `chirp_q16`.
 pub(crate) fn bwexpander_32(ar: &mut [i32], chirp_q16: i32) {
     let d = ar.len();
     let chirp_minus_one_q16 = chirp_q16 - 65536;
@@ -26,7 +25,7 @@ pub(crate) fn bwexpander_32(ar: &mut [i32], chirp_q16: i32) {
     ar[d - 1] = smulww(chirp_q16, ar[d - 1]);
 }
 
-/// `silk_LPC_fit`: converts `a_qin` (Q`qin`) to i16 output in Q`qout`,
+/// Converts `a_qin` (Q`qin`) to i16 output in Q`qout`,
 /// applying bandwidth expansion until the values fit (clipping as a last
 /// resort).
 pub(crate) fn lpc_fit(a_qout: &mut [i16], a_qin: &mut [i32], qout: i32, qin: i32) {
@@ -70,7 +69,7 @@ pub(crate) fn lpc_fit(a_qout: &mut [i16], a_qin: &mut [i32], qout: i32, qin: i32
     }
 }
 
-/// `QA` of the inverse-prediction-gain recursion (LPC_inv_pred_gain.c).
+/// `QA` of the inverse-prediction-gain recursion.
 const QA: i32 = 24;
 /// `A_LIMIT`: `SILK_FIX_CONST(0.99975, 24)`.
 const A_LIMIT: i32 = 16_773_022;
@@ -84,8 +83,7 @@ const fn mul32_frac_q(a: i32, b: i32, q: i32) -> i32 {
     rshift_round64(smull(a, b), q) as i32
 }
 
-/// `LPC_inverse_pred_gain_QA_c`: the reflection recursion over QA(24)
-/// coefficients; 0 means unstable.
+/// The reflection recursion over QA(24) coefficients; 0 means unstable.
 fn lpc_inverse_pred_gain_qa(a_qa: &mut [i32]) -> i32 {
     let order = a_qa.len();
     let mut inv_gain_q30 = 1i32 << 30;
@@ -136,8 +134,8 @@ fn lpc_inverse_pred_gain_qa(a_qa: &mut [i32]) -> i32 {
     inv_gain_q30
 }
 
-/// `silk_LPC_inverse_pred_gain`: inverse prediction gain (Q30) of Q12
-/// coefficients; 0 means the filter is (too close to) unstable.
+/// Inverse prediction gain (Q30) of Q12 coefficients; 0 means the filter is
+/// (too close to) unstable.
 pub(crate) fn lpc_inverse_pred_gain(a_q12: &[i16]) -> i32 {
     let mut a_qa = [0i32; SILK_MAX_ORDER_LPC];
     let mut dc_resp = 0i32;
@@ -152,8 +150,8 @@ pub(crate) fn lpc_inverse_pred_gain(a_q12: &[i16]) -> i32 {
     lpc_inverse_pred_gain_qa(&mut a_qa[..a_q12.len()])
 }
 
-/// `silk_LPC_analysis_filter`: MA whitening filter (Q12 taps); the first
-/// `order` outputs are zeroed. Wrap-around in the accumulator is allowed -
+/// MA whitening filter (Q12 taps); the first `order` outputs are zeroed.
+/// Wrap-around in the accumulator is allowed -
 /// only invalid streams can trigger it, and two wraps cancel.
 pub(crate) fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i16]) {
     use super::math::{rshift_round, smlabb};

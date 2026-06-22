@@ -1,5 +1,4 @@
-//! Per-frame parameter assembly (RFC 6716 §4.2.7.4-4.2.7.6; normative
-//! `decode_parameters.c`, `bwexpander.c`).
+//! Per-frame parameter assembly (RFC 6716 §4.2.7.4-4.2.7.6).
 //!
 //! Turns the decoded side information into the synthesis controls: linear
 //! subframe gains, the two half-frame LPC coefficient sets (with NLSF
@@ -15,13 +14,12 @@ use super::nlsf::{nlsf_decode, nlsf2a};
 use super::pitch::decode_pitch;
 use super::tables::{LTP_GAIN_VQ_0, LTP_GAIN_VQ_1, LTP_GAIN_VQ_2, LTPSCALES_TABLE_Q14};
 
-/// `LTP_ORDER`: taps per LTP filter.
+/// Taps per LTP filter.
 pub(crate) const LTP_ORDER: usize = 5;
-/// `BWE_AFTER_LOSS_Q16`.
 const BWE_AFTER_LOSS_Q16: i32 = 63570;
 
-/// `silk_bwexpander`: chirps an i16 AR filter. The reference deliberately
-/// avoids `silk_SMULWB` here - its bias can destabilise filters.
+/// Chirps an i16 AR filter. Deliberately
+/// avoids the biased fixed-point multiply here - its bias can destabilise filters.
 pub(crate) fn bwexpander(ar: &mut [i16], chirp_q16: i32) {
     let d = ar.len();
     let chirp_minus_one_q16 = chirp_q16 - 65536;
@@ -33,7 +31,7 @@ pub(crate) fn bwexpander(ar: &mut [i16], chirp_q16: i32) {
     ar[d - 1] = rshift_round(mul(chirp_q16, i32::from(ar[d - 1])), 16) as i16;
 }
 
-/// Synthesis controls for one frame (`silk_decoder_control`).
+/// Synthesis controls for one frame.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DecoderControl {
     /// Per-subframe pitch lags in samples (`pitchL`).
@@ -72,10 +70,9 @@ impl Default for ParamState {
     }
 }
 
-/// `silk_decode_parameters`: side information → synthesis controls.
+/// Side information → synthesis controls.
 ///
-/// `indices.per_index` is reset to 0 for unvoiced frames exactly as the
-/// reference mutates its copy.
+/// `indices.per_index` is reset to 0 for unvoiced frames.
 pub(crate) fn decode_parameters(
     indices: &mut SideInfoIndices,
     state: &mut ParamState,

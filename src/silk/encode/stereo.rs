@@ -1,5 +1,4 @@
-//! Stereo prediction quantisation for the SILK encoder (RFC 6716 §5.2;
-//! normative `silk/stereo_quant_pred.c`, `silk/stereo_encode_pred.c`).
+//! Stereo prediction quantisation for the SILK encoder (RFC 6716 §5.2).
 //!
 //! The mid/side stereo predictor weights are vector-quantised on a
 //! sub-stepped grid of the shared `STEREO_PRED_QUANT_Q13` levels and coded
@@ -385,7 +384,7 @@ mod tests {
         }
     }
 
-    /// Bit-exact pin of `silk_stereo_LR_to_MS` against the compiled reference
+    /// Bit-exact pin against the reference
     /// over 50 frames (state evolves; mid-only flips to 0 around frame 49).
     #[test]
     fn lr_to_ms_matches_reference_pins() {

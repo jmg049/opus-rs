@@ -1,74 +1,73 @@
-//! SILK fixed-point arithmetic kernels (normative `silk/macros.h`,
-//! `SigProc_FIX.h`, `Inlines.h`, `lin2log.c`, `log2lin.c`).
+//! SILK fixed-point arithmetic kernels.
 //!
 //! The SILK decoder is integer-only: unlike CELT's float build, *every*
 //! operation here is bitstream-affecting and must match the reference
-//! bit-for-bit. The portable 64-bit forms of the reference macros are used
-//! throughout; additions that the reference performs in (two's-complement)
-//! machine arithmetic are `wrapping_*` here.
+//! bit-for-bit. The portable 64-bit forms are used throughout; additions
+//! that the reference performs in (two's-complement) machine arithmetic are
+//! `wrapping_*` here.
 #![allow(dead_code, reason = "some kernels are used only by the std-gated encoder")]
 
-/// `silk_SMULWB`: `(a * (i64)(i16)b) >> 16`.
+/// `(a * (i64)(i16)b) >> 16`.
 #[inline]
 pub(crate) const fn smulwb(a: i32, b: i32) -> i32 {
     ((a as i64 * (b as i16 as i64)) >> 16) as i32
 }
 
-/// `silk_SMLAWB`: `a + ((b * (i64)(i16)c) >> 16)`.
+/// `a + ((b * (i64)(i16)c) >> 16)`.
 #[inline]
 pub(crate) const fn smlawb(a: i32, b: i32, c: i32) -> i32 {
     a.wrapping_add(((b as i64 * (c as i16 as i64)) >> 16) as i32)
 }
 
-/// `silk_SMLAWT`: `a + ((b * (i64)(c >> 16)) >> 16)`.
+/// `a + ((b * (i64)(c >> 16)) >> 16)`.
 #[inline]
 pub(crate) const fn smlawt(a: i32, b: i32, c: i32) -> i32 {
     a.wrapping_add(((b as i64 * (c >> 16) as i64) >> 16) as i32)
 }
 
-/// `silk_SMULBB`: `(i32)(i16)a * (i32)(i16)b`.
+/// `(i32)(i16)a * (i32)(i16)b`.
 #[inline]
 pub(crate) const fn smulbb(a: i32, b: i32) -> i32 {
     (a as i16 as i32).wrapping_mul(b as i16 as i32)
 }
 
-/// `silk_SMLABB`: `a + (i32)(i16)b * (i32)(i16)c`.
+/// `a + (i32)(i16)b * (i32)(i16)c`.
 #[inline]
 pub(crate) const fn smlabb(a: i32, b: i32, c: i32) -> i32 {
     a.wrapping_add((b as i16 as i32).wrapping_mul(c as i16 as i32))
 }
 
-/// `silk_SMULWW`: `((i64)a * b) >> 16`.
+/// `((i64)a * b) >> 16`.
 #[inline]
 pub(crate) const fn smulww(a: i32, b: i32) -> i32 {
     ((a as i64 * b as i64) >> 16) as i32
 }
 
-/// `silk_SMLAWW`: `(i32)(a + (((i64)b * c) >> 16))`.
+/// `(i32)(a + (((i64)b * c) >> 16))`.
 #[inline]
 pub(crate) const fn smlaww(a: i32, b: i32, c: i32) -> i32 {
     (a as i64).wrapping_add((b as i64 * c as i64) >> 16) as i32
 }
 
-/// `silk_SMMUL`: `((i64)a * b) >> 32`.
+/// `((i64)a * b) >> 32`.
 #[inline]
 pub(crate) const fn smmul(a: i32, b: i32) -> i32 {
     ((a as i64 * b as i64) >> 32) as i32
 }
 
-/// `silk_ADD_SAT32`.
+/// Saturating 32-bit addition.
 #[inline]
 pub(crate) const fn add_sat32(a: i32, b: i32) -> i32 {
     a.saturating_add(b)
 }
 
-/// `silk_SUB_SAT32`.
+/// Saturating 32-bit subtraction.
 #[inline]
 pub(crate) const fn sub_sat32(a: i32, b: i32) -> i32 {
     a.saturating_sub(b)
 }
 
-/// `silk_LSHIFT_SAT32`: saturating left shift.
+/// Saturating left shift.
 #[inline]
 pub(crate) const fn lshift_sat32(a: i32, shift: i32) -> i32 {
     let lo = i32::MIN >> shift;
@@ -83,7 +82,7 @@ pub(crate) const fn lshift_sat32(a: i32, shift: i32) -> i32 {
     a << shift
 }
 
-/// `silk_RSHIFT_ROUND`: right shift with round-to-nearest (shift ≥ 1).
+/// Right shift with round-to-nearest (shift ≥ 1).
 #[inline]
 pub(crate) const fn rshift_round(a: i32, shift: i32) -> i32 {
     if shift == 1 {
@@ -93,7 +92,7 @@ pub(crate) const fn rshift_round(a: i32, shift: i32) -> i32 {
     }
 }
 
-/// `silk_ROR32`: rotate right by `rot` (left for negative `rot`).
+/// Rotate right by `rot` (left for negative `rot`).
 #[inline]
 pub(crate) const fn ror32(a: i32, rot: i32) -> i32 {
     if rot == 0 {
@@ -105,21 +104,20 @@ pub(crate) const fn ror32(a: i32, rot: i32) -> i32 {
     }
 }
 
-/// `silk_CLZ32`: leading zeros of the 32-bit pattern (32 for zero).
+/// Leading zeros of the 32-bit pattern (32 for zero).
 #[inline]
 pub(crate) const fn clz32(a: i32) -> i32 {
     (a as u32).leading_zeros() as i32
 }
 
-/// `silk_CLZ_FRAC`: leading zeros and the 7 bits right after the leading
-/// one.
+/// Leading zeros and the 7 bits right after the leading one.
 #[inline]
 pub(crate) const fn clz_frac(a: i32) -> (i32, i32) {
     let lz = clz32(a);
     (lz, ror32(a, 24 - lz) & 0x7f)
 }
 
-/// `silk_SQRT_APPROX`: approximate square root of a positive value.
+/// Approximate square root of a positive value.
 pub(crate) const fn sqrt_approx(x: i32) -> i32 {
     if x <= 0 {
         return 0;
@@ -131,14 +129,14 @@ pub(crate) const fn sqrt_approx(x: i32) -> i32 {
     smlawb(y, y, smulbb(213, frac_q7))
 }
 
-/// `silk_lin2log`: approximate `128 * log2(x)` (Q7).
+/// Approximate `128 * log2(x)` (Q7).
 pub(crate) const fn lin2log(x: i32) -> i32 {
     let (lz, frac_q7) = clz_frac(x);
     // Piece-wise parabolic approximation.
     smlawb(frac_q7, frac_q7.wrapping_mul(128 - frac_q7), 179).wrapping_add((31 - lz) << 7)
 }
 
-/// `silk_log2lin`: approximate `2^(x/128)` (input Q7).
+/// Approximate `2^(x/128)` (input Q7).
 pub(crate) const fn log2lin(in_log_q7: i32) -> i32 {
     if in_log_q7 < 0 {
         return 0;
@@ -155,8 +153,7 @@ pub(crate) const fn log2lin(in_log_q7: i32) -> i32 {
     }
 }
 
-/// `silk_INVERSE32_varQ`: approximate `(1 << q_res) / b` (`b != 0`,
-/// `q_res > 0`).
+/// Approximate `(1 << q_res) / b` (`b != 0`, `q_res > 0`).
 pub(crate) const fn inverse32_var_q(b32: i32, q_res: i32) -> i32 {
     debug_assert!(b32 != 0);
     debug_assert!(q_res > 0);
@@ -182,8 +179,7 @@ pub(crate) const fn inverse32_var_q(b32: i32, q_res: i32) -> i32 {
     }
 }
 
-/// `silk_DIV32_varQ`: approximate `(a << q_res) / b` (`b != 0`,
-/// `q_res >= 0`).
+/// Approximate `(a << q_res) / b` (`b != 0`, `q_res >= 0`).
 pub(crate) const fn div32_var_q(a32: i32, b32: i32, q_res: i32) -> i32 {
     debug_assert!(b32 != 0);
     debug_assert!(q_res >= 0);
@@ -211,37 +207,37 @@ pub(crate) const fn div32_var_q(a32: i32, b32: i32, q_res: i32) -> i32 {
     }
 }
 
-/// `silk_SMULL`: full 64-bit product.
+/// Full 64-bit product.
 #[inline]
 pub(crate) const fn smull(a: i32, b: i32) -> i64 {
     a as i64 * b as i64
 }
 
-/// `silk_RSHIFT_ROUND64`: 64-bit right shift with round-to-nearest.
+/// 64-bit right shift with round-to-nearest.
 #[inline]
 pub(crate) const fn rshift_round64(a: i64, shift: i32) -> i64 {
     ((a >> (shift - 1)) + 1) >> 1
 }
 
-/// `silk_SMULTT`: `(a >> 16) * (b >> 16)`.
+/// `(a >> 16) * (b >> 16)`.
 #[inline]
 pub(crate) const fn smultt(a: i32, b: i32) -> i32 {
     (a >> 16).wrapping_mul(b >> 16)
 }
 
-/// `silk_ADD_SAT16`.
+/// Saturating 16-bit addition.
 #[inline]
 pub(crate) const fn add_sat16(a: i16, b: i16) -> i16 {
     a.saturating_add(b)
 }
 
-/// `silk_ADD_RSHIFT_uint`: `a + (b >> shift)` in unsigned arithmetic.
+/// `a + (b >> shift)` in unsigned arithmetic.
 #[inline]
 pub(crate) const fn add_rshift_uint(a: u32, b: u32, shift: i32) -> u32 {
     a.wrapping_add(b >> shift)
 }
 
-/// `silk_MUL`: 32-bit multiply (the reference asserts no overflow).
+/// 32-bit multiply (the reference asserts no overflow).
 #[inline]
 pub(crate) const fn mul(a: i32, b: i32) -> i32 {
     a.wrapping_mul(b)
@@ -251,8 +247,7 @@ pub(crate) const fn mul(a: i32, b: i32) -> i32 {
 mod tests {
     use super::*;
 
-    /// Pins generated by compiling the reference `SigProc_FIX.h`/`Inlines.h`
-    /// and `lin2log.c`/`log2lin.c` directly and printing these exact calls.
+    /// Reference pins for these exact kernel calls.
     #[test]
     fn kernels_match_reference_pins() {
         for (x, want) in [

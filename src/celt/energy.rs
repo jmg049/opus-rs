@@ -1,4 +1,4 @@
-//! Energy envelope decoding (RFC 6716 §4.3.2; normative `quant_bands.c`).
+//! Energy envelope decoding (RFC 6716 §4.3.2).
 //!
 //! CELT transmits each band's energy in base-2 log units ("DB" in the
 //! reference) in up to three refinement stages:

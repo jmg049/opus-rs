@@ -1,5 +1,4 @@
-//! SILK packet-loss concealment and comfort-noise generation
-//! (normative `PLC.c`, `CNG.c`, `sum_sqr_shift.c`).
+//! SILK packet-loss concealment and comfort-noise generation.
 //!
 //! Concealment extrapolates the last frame's LTP/LPC model over a noise
 //! excitation drawn from the quietest recent subframe, with per-frame
@@ -19,34 +18,34 @@ use super::math::{
 use super::nlsf::nlsf2a;
 use super::params::{DecoderControl, LTP_ORDER, bwexpander};
 
-/// `HARM_ATT_Q15` (0.99, 0.95) and the random-component attenuations.
+/// Harmonic attenuation (0.99, 0.95) and the random-component attenuations.
 const HARM_ATT_Q15: [i32; 2] = [32440, 31130];
 const PLC_RAND_ATTENUATE_V_Q15: [i32; 2] = [31130, 26214];
 const PLC_RAND_ATTENUATE_UV_Q15: [i32; 2] = [32440, 29491];
 
-/// `BWE_COEF` in Q16 (`SILK_FIX_CONST(0.99, 16)`).
+/// Bandwidth-expansion coefficient in Q16 (`SILK_FIX_CONST(0.99, 16)`).
 const BWE_COEF_Q16: i32 = 64881;
-/// `V_PITCH_GAIN_START_{MIN,MAX}_Q14`.
+/// Voiced pitch-gain start bounds.
 const V_PITCH_GAIN_START_MIN_Q14: i32 = 11469;
 const V_PITCH_GAIN_START_MAX_Q14: i32 = 15565;
-/// `RAND_BUF_SIZE` / mask.
+/// Random-buffer size / mask.
 const RAND_BUF_SIZE: usize = 128;
-/// `LOG2_INV_LPC_GAIN_{HIGH,LOW}_THRES`.
+/// Log2 inverse-LPC-gain thresholds.
 const LOG2_INV_LPC_GAIN_HIGH_THRES: i32 = 3;
 const LOG2_INV_LPC_GAIN_LOW_THRES: i32 = 8;
-/// `PITCH_DRIFT_FAC_Q16` (0.01).
+/// Pitch-drift factor (0.01).
 const PITCH_DRIFT_FAC_Q16: i32 = 655;
-/// `MAX_PITCH_LAG_MS`.
+/// Maximum pitch lag in ms.
 const MAX_PITCH_LAG_MS: i32 = 18;
-/// `CNG_BUF_MASK_MAX`, `CNG_NLSF_SMTH_Q16`, `CNG_GAIN_SMTH_Q16`,
-/// `CNG_GAIN_SMTH_THRESHOLD_Q16` (define.h).
+/// Comfort-noise buffer mask, NLSF and gain smoothing factors, and the
+/// gain-smoothing threshold.
 const CNG_BUF_MASK_MAX: i32 = 255;
 const CNG_NLSF_SMTH_Q16: i32 = 16348;
 const CNG_GAIN_SMTH_Q16: i32 = 4634;
 const CNG_GAIN_SMTH_THRESHOLD_Q16: i32 = 46396;
 
-/// `silk_sum_sqr_shift`: energy of an i16 vector and the right shift that
-/// makes it fit an i32 with headroom.
+/// Energy of an i16 vector and the right shift that makes it fit an i32
+/// with headroom.
 pub(crate) fn sum_sqr_shift(x: &[i16]) -> (i32, i32) {
     let len = x.len() as i32;
     let mut shft = 31 - clz32(len);
@@ -79,7 +78,7 @@ pub(crate) fn sum_sqr_shift(x: &[i16]) -> (i32, i32) {
     (nrg as i32, shft)
 }
 
-/// Concealment state (`silk_PLC_struct`).
+/// Concealment state.
 #[derive(Debug, Clone)]
 pub(crate) struct PlcState {
     pub pitch_l_q8: i32,
@@ -117,7 +116,7 @@ impl Default for PlcState {
     }
 }
 
-/// Comfort-noise state (`silk_CNG_struct`).
+/// Comfort-noise state.
 #[derive(Debug, Clone)]
 pub(crate) struct CngState {
     pub exc_buf_q14: [i32; MAX_FRAME_LENGTH],
@@ -142,7 +141,7 @@ impl Default for CngState {
 }
 
 impl SilkChannelDecoder {
-    /// `silk_PLC_Reset`.
+    /// Reset the concealment state.
     pub(crate) fn plc_reset(&mut self) {
         self.plc.pitch_l_q8 = (self.frame_length as i32) << 7;
         self.plc.prev_gain_q16 = [1 << 16; 2];
@@ -150,7 +149,7 @@ impl SilkChannelDecoder {
         self.plc.nb_subfr = 2;
     }
 
-    /// `silk_CNG_Reset`.
+    /// Reset the comfort-noise state.
     pub(crate) fn cng_reset(&mut self) {
         let step_q15 = i32::from(i16::MAX) / (self.lpc_order as i32 + 1);
         let mut acc_q15 = 0;
@@ -162,7 +161,7 @@ impl SilkChannelDecoder {
         self.cng.rand_seed = 3_176_576;
     }
 
-    /// `silk_PLC`: update on good frames, conceal on lost ones.
+    /// Update on good frames, conceal on lost ones.
     pub(crate) fn plc(&mut self, ctrl: &mut DecoderControl, frame: &mut [i16], lost: bool) {
         if self.fs_khz != self.plc.fs_khz {
             self.plc_reset();
@@ -176,7 +175,7 @@ impl SilkChannelDecoder {
         }
     }
 
-    /// `silk_PLC_update`: capture the model of the last good frame.
+    /// Capture the model of the last good frame.
     fn plc_update(&mut self, ctrl: &DecoderControl) {
         self.prev_signal_type = i32::from(self.indices.signal_type);
         let mut ltp_gain_q14 = 0i32;
@@ -229,7 +228,7 @@ impl SilkChannelDecoder {
         self.plc.nb_subfr = self.nb_subfr;
     }
 
-    /// `silk_PLC_conceal`: synthesize one concealed frame into `frame`.
+    /// Synthesize one concealed frame into `frame`.
     #[allow(clippy::too_many_lines, reason = "mirrors the reference sequence")]
     fn plc_conceal(&mut self, ctrl: &mut DecoderControl, frame: &mut [i16]) {
         let prev_gain_q10 = [self.plc.prev_gain_q16[0] >> 6, self.plc.prev_gain_q16[1] >> 6];
@@ -356,8 +355,9 @@ impl SilkChannelDecoder {
         self.slpc_q14_buf
             .copy_from_slice(&s_ltp_q14[base + self.frame_length..base + self.frame_length + MAX_LPC_ORDER]);
 
-        // State updates (B_Q14 aliases the persistent LTP coefficients in
-        // the reference, so the per-subframe decay carries across losses).
+        // State updates: the decayed LTP coefficients are written back to
+        // the persistent state, so the per-subframe decay carries across
+        // losses.
         self.plc.ltp_coef_q14 = b_q14;
         self.plc.rand_seed = rand_seed;
         self.plc.rand_scale_q14 = rand_scale_q14 as i16;
@@ -366,8 +366,8 @@ impl SilkChannelDecoder {
         }
     }
 
-    /// `silk_PLC_glue_frames`: fades the first good frame back in when its
-    /// energy exceeds the concealment's.
+    /// Fades the first good frame back in when its energy exceeds the
+    /// concealment's.
     pub(crate) fn plc_glue_frames(&mut self, frame: &mut [i16]) {
         if self.loss_cnt != 0 {
             let (e, s) = sum_sqr_shift(frame);
@@ -402,8 +402,8 @@ impl SilkChannelDecoder {
         }
     }
 
-    /// `silk_CNG`: updates the comfort-noise estimate on active-silent good
-    /// frames, and mixes comfort noise into concealed ones.
+    /// Updates the comfort-noise estimate on active-silent good frames, and
+    /// mixes comfort noise into concealed ones.
     pub(crate) fn cng(&mut self, ctrl: &DecoderControl, frame: &mut [i16]) {
         let length = self.frame_length;
         if self.fs_khz != self.cng.fs_khz {

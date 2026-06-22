@@ -1,7 +1,6 @@
 //! Bit-allocation tables of the standard CELT mode, extracted mechanically
-//! from the normative reference sources (`modes.c`, `static_modes_fixed.h`,
-//! `rate.c` of xiph/opus v1.1) - see `tools/` provenance note in the module
-//! docs of [`super::rate`]. Do not edit by hand.
+//! - see `tools/` provenance note in the module docs of [`super::rate`]. Do
+//! not edit by hand.
 
 use super::modes::NB_EBANDS;
 
@@ -10,7 +9,7 @@ use super::modes::NB_EBANDS;
 /// between.
 pub const NB_ALLOC_VECTORS: usize = 11;
 
-/// Rows = quality, columns = band (`band_allocation`, modes.c).
+/// Rows = quality, columns = band (`band_allocation`).
 pub const BAND_ALLOCATION: [u8; NB_ALLOC_VECTORS * NB_EBANDS] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 90, 80, 75, 69, 63, 56, 49, 40, 34, 29, 20, 18, 10,
     0, 0, 0, 0, 0, 0, 0, 0, 110, 100, 90, 84, 78, 71, 65, 58, 51, 45, 39, 32, 26, 20, 12, 0, 0, 0, 0, 0, 0, 118, 110,
@@ -69,13 +68,13 @@ pub const CACHE_CAPS: [u8; 168] = [
 ];
 
 /// `log2_frac(len, BITRES)`-style table used to size the intensity-stereo
-/// parameter (`LOG2_FRAC_TABLE`, rate.c).
+/// parameter (`LOG2_FRAC_TABLE`).
 pub const LOG2_FRAC_TABLE: [u8; 24] = [
     0, 8, 13, 16, 19, 21, 23, 24, 26, 27, 28, 29, 30, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 37,
 ];
 
-/// The low-overlap MDCT window of the standard mode (`window120`,
-/// static_modes_float.h): 120 samples of the Vorbis power window
+/// The low-overlap MDCT window of the standard mode (`window120`):
+/// 120 samples of the Vorbis power window
 /// `sin(0.5*pi * sin^2(0.5*pi*(i+0.5)/overlap))`, applied to the first and
 /// last `overlap` samples of each MDCT block.
 #[allow(

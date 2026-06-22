@@ -1,11 +1,10 @@
-//! LPC → NLSF conversion for the SILK encoder (RFC 6716 §5.2.3; normative
-//! `silk/A2NLSF.c` and `silk/float/wrappers_FLP.c`).
+//! LPC → NLSF conversion for the SILK encoder (RFC 6716 §5.2.3).
 //!
 //! [`a2nlsf`] is the exact inverse of the decoder's [`super::super::nlsf::nlsf2a`]:
 //! it finds the roots of the even/odd whitening-filter polynomials in the
 //! cos domain (a piecewise-linear LSF↔cos map, so the NLSFs aren't exact but
 //! the two maps invert each other), bandwidth-expanding the input until all
-//! roots are found. Fixed-point throughout, mirroring `silk_A2NLSF`.
+//! roots are found. Fixed-point throughout.
 
 extern crate alloc;
 use alloc::vec;

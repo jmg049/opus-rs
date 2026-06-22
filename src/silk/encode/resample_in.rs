@@ -1,7 +1,7 @@
 //! Float front-end downsampler for the SILK encoder (48 kHz API rate →
 //! 8/12/16 kHz internal rate).
 //!
-//! The reference resampler (`silk/resampler_private_down_FIR.c`) is fixed-point
+//! The reference resampler is fixed-point
 //! (`Q8`/`Q14`/`Q16`), and the decoder direction keeps it bit-exact. The encoder
 //! input resampler, however, only conditions the analysis signal - it never
 //! defines the bitstream - so it can run in `f32`, where the AR2 pre-filter and
@@ -9,7 +9,7 @@
 //! ([`crate::simd::dot`], AVX2+FMA) handles ~6× faster than the scalar
 //! fixed-point MACs that dominated SILK encode (callgrind: `down_fir` was ~16%).
 //!
-//! It is a faithful float port of the reference's `DownFIR` path: same AR2
+//! It uses the same AR2
 //! coefficients and same FIR taps, so the filter response - and therefore the
 //! conditioned signal's quality - matches the fixed-point resampler to within
 //! rounding (validated against it in the tests, and end to end by the
@@ -100,8 +100,8 @@ impl EncDownsampler {
 
     /// Resamples `input` (48 kHz, `f32` in i16-sample units, length a multiple
     /// of 1 ms and ≥ 1 ms) into `out` (`input.len() / decim` i16 samples),
-    /// carrying filter state across calls. Mirrors `silk_resampler`'s
-    /// head/tail split around the input delay.
+    /// carrying filter state across calls, with a head/tail split around the
+    /// input delay.
     pub(crate) fn process(&mut self, out: &mut [i16], input: &[f32]) {
         let in_len = input.len();
         debug_assert!(in_len >= self.fs_in_khz);

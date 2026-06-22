@@ -1,5 +1,4 @@
-//! Excitation pulse decoding (RFC 6716 §4.2.7.8; normative
-//! `decode_pulses.c`, `shell_coder.c`, `code_signs.c`).
+//! Excitation pulse decoding (RFC 6716 §4.2.7.8).
 //!
 //! The excitation is coded per 16-sample *shell block*: a rate level picks
 //! the iCDF for each block's total pulse count; each total is then split
@@ -32,7 +31,7 @@ const SILK_MAX_PULSES: usize = 16;
 /// table).
 const N_RATE_LEVELS: usize = 10;
 
-/// `decode_split`: one node of the shell decomposition.
+/// One node of the shell decomposition.
 #[inline]
 fn decode_split(dec: &mut RangeDecoder, p: i32, shell_table: &[u8]) -> (i32, i32) {
     if p > 0 {
@@ -44,8 +43,8 @@ fn decode_split(dec: &mut RangeDecoder, p: i32, shell_table: &[u8]) -> (i32, i32
     }
 }
 
-/// `silk_shell_decoder`: decodes one 16-sample shell block of nonnegative
-/// pulse amplitudes whose total is `pulses4`.
+/// Decodes one 16-sample shell block of nonnegative pulse amplitudes whose
+/// total is `pulses4`.
 pub(crate) fn shell_decoder(pulses0: &mut [i16], dec: &mut RangeDecoder, pulses4: i32) {
     debug_assert!(pulses0.len() >= SHELL_CODEC_FRAME_LENGTH);
     let mut pulses3 = [0i32; 2];
@@ -80,10 +79,10 @@ pub(crate) fn shell_decoder(pulses0: &mut [i16], dec: &mut RangeDecoder, pulses4
     leaf(dec, 14, pulses1[7]);
 }
 
-/// `silk_decode_signs`: attaches signs to the nonzero decoded pulses.
+/// Attaches signs to the nonzero decoded pulses.
 ///
 /// `sum_pulses` per block conditions the sign probability (with LSB counts
-/// folded in at bit 5+, exactly as the reference passes them).
+/// folded in at bit 5+).
 pub(crate) fn decode_signs(
     dec: &mut RangeDecoder,
     pulses: &mut [i16],
@@ -110,8 +109,8 @@ pub(crate) fn decode_signs(
     }
 }
 
-/// `silk_decode_pulses`: decodes the excitation for one SILK frame of
-/// `frame_length` samples - rate level, per-block pulse counts, shell
+/// Decodes the excitation for one SILK frame of `frame_length` samples -
+/// rate level, per-block pulse counts, shell
 /// decomposition, LSB planes, and signs.
 ///
 /// Returns the signed excitation, padded to a whole number of shell blocks
@@ -185,8 +184,8 @@ pub(crate) fn decode_pulses(
     pulses
 }
 
-/// `combine_and_check`: pairwise-sum `pulses_in` into `pulses_comb`,
-/// returning `true` if any combined count exceeds `max_pulses`.
+/// Pairwise-sum `pulses_in` into `pulses_comb`, returning `true` if any
+/// combined count exceeds `max_pulses`.
 fn combine_and_check(pulses_comb: &mut [i32], pulses_in: &[i32], max_pulses: i32, len: usize) -> bool {
     let mut scale_down = false;
     for k in 0..len {
@@ -199,12 +198,12 @@ fn combine_and_check(pulses_comb: &mut [i32], pulses_in: &[i32], max_pulses: i32
     scale_down
 }
 
-/// `silk_shell_encoder` (shell_coder.c): code one 16-sample block's pulse
-/// magnitudes by recursive binary splits, top down.
+/// Code one 16-sample block's pulse magnitudes by recursive binary splits,
+/// top down.
 fn shell_encoder(enc: &mut RangeEncoder, pulses0: &[i32]) {
-    // Build the four levels of the pulse binary tree on the stack (mirrors
-    // libopus's silk_shell_encoder fixed arrays). The previous `collect()` form
-    // allocated four Vecs per 16-sample block - ~80 heap allocations per frame.
+    // Build the four levels of the pulse binary tree on the stack with fixed
+    // arrays. The previous `collect()` form allocated four Vecs per 16-sample
+    // block - ~80 heap allocations per frame.
     fn combine(out: &mut [i32], input: &[i32]) {
         for (o, p) in out.iter_mut().zip(input.chunks_exact(2)) {
             *o = p[0] + p[1];
@@ -242,9 +241,8 @@ fn shell_encoder(enc: &mut RangeEncoder, pulses0: &[i32]) {
     encode_split(enc, pulses0[14], pulses1[7], &SHELL_CODE_TABLE0);
 }
 
-/// `silk_encode_signs` (code_signs.c): code the sign of each nonzero pulse,
-/// with the probability conditioned on signal type, quantisation offset and
-/// the block's pulse count.
+/// Code the sign of each nonzero pulse, with the probability conditioned on
+/// signal type, quantisation offset and the block's pulse count.
 fn encode_signs(
     enc: &mut RangeEncoder,
     pulses: &[i8],
@@ -269,7 +267,7 @@ fn encode_signs(
     }
 }
 
-/// `silk_encode_pulses`: code the excitation `pulses` (signed quantisation
+/// Code the excitation `pulses` (signed quantisation
 /// indices, `frame_length` of them) - rate level, per-block pulse counts
 /// (with LSB extension when a block saturates), the shell magnitudes, the
 /// extra LSB planes, and the signs. The exact inverse of [`decode_pulses`].
@@ -287,8 +285,7 @@ pub(crate) fn encode_pulses(
     }
     let padded = iter * SHELL_CODEC_FRAME_LENGTH;
 
-    // Zero-pad the pulses to a whole number of shell blocks (the reference
-    // memsets the tail of the caller's buffer).
+    // Zero-pad the pulses to a whole number of shell blocks.
     let mut spulses = vec![0i8; padded];
     spulses[..frame_length].copy_from_slice(pulses);
     let pulses = &spulses[..];
@@ -400,7 +397,7 @@ mod tests {
     }
 
     /// Shell blocks of every total 0..=16, plus signed round trips through
-    /// the sign coder, mirroring the reference call sequence.
+    /// the sign coder.
     #[test]
     fn shell_and_sign_round_trip() {
         let mut seed = 0x5eed_u32;

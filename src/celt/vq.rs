@@ -1,5 +1,5 @@
 //! PVQ vector decoding: spreading rotation, residual normalisation, and the
-//! shape decoder (RFC 6716 §4.3.4.3; normative `vq.c`, float build).
+//! shape decoder (RFC 6716 §4.3.4.3).
 //!
 //! A band's decoded pulse vector is normalised to unit norm (times the
 //! requested gain) and then counter-rotated to undo the encoder's spreading
@@ -70,8 +70,7 @@ fn exp_rotation1(x: &mut [f32], stride: usize, c: f32, s: f32) {
 /// `(cos(½π·θ), sin(½π·θ))` - the spreading rotation's gains. `θ = ½·gain²`
 /// with `gain ≤ 1`, so the angle is in `[0, π/4]`, where these short Taylor
 /// polynomials are accurate to far better than `f32` precision. This replaces
-/// two libm `cos` calls that were ~25% of CELT encode (the system libopus, a
-/// fixed-point build, uses a polynomial too). It is shared by encode and decode
+/// two libm `cos` calls that were ~25% of CELT encode. It is shared by encode and decode
 /// so the rotation stays exactly invertible; the coded pulse indices - and thus
 /// the range-coder state - are unaffected, only the spread shaping shifts by a
 /// hair (well within the conformance PCM tolerance).
@@ -195,8 +194,7 @@ pub fn renormalise_vector(x: &mut [f32], gain: f32) {
     }
 }
 
-/// `fast_atan2f` (mathops.h): the float approximation the encoder uses for
-/// the theta angle.
+/// The float approximation the encoder uses for the theta angle.
 fn fast_atan2f(y: f32, x: f32) -> f32 {
     const CA: f32 = 0.43157974;
     #[allow(clippy::excessive_precision, reason = "verbatim reference constant")]

@@ -1,4 +1,4 @@
-//! Bit allocation (RFC 6716 §4.3.3; normative `rate.c`).
+//! Bit allocation (RFC 6716 §4.3.3).
 //!
 //! CELT never transmits the allocation: encoder and decoder each derive the
 //! identical per-band budget from nothing but the frame size in bits, the
@@ -131,7 +131,7 @@ pub fn pulses2bits(band: usize, lm: i32, pulses: i32) -> i32 {
     }
 }
 
-/// Maximum allocation per band in 1/8 bits (`init_caps`, celt.c).
+/// Maximum allocation per band in 1/8 bits (`init_caps`).
 #[must_use]
 pub fn init_caps(lm: usize, channels: usize) -> [i32; NB_EBANDS] {
     let mut cap = [0i32; NB_EBANDS];
@@ -171,7 +171,7 @@ pub struct Allocation {
 /// `total` the bits available for the remainder of the frame in 1/8 bits.
 #[allow(
     clippy::too_many_arguments,
-    reason = "mirrors the reference compute_allocation signature"
+    reason = "mirrors the reference allocation signature"
 )]
 #[must_use]
 pub fn compute_allocation(

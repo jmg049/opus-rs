@@ -24,7 +24,7 @@
 //!
 //! Methods keep a recognizable mapping to the reference implementation:
 //!
-//! | This crate | Reference (`entdec.c`/`entenc.c`) |
+//! | This crate | Reference |
 //! |------------|------------------------------------|
 //! | `decode`/`encode` | `ec_decode`/`ec_encode` |
 //! | `decode_bin`/`encode_bin` | `ec_decode_bin`/`ec_encode_bin` |

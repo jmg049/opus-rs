@@ -1,5 +1,5 @@
-//! The CELT frame decoder (RFC 6716 §4.3; normative `celt_decoder.c`, float
-//! build) - the driver that sequences every stage into PCM.
+//! The CELT frame decoder (RFC 6716 §4.3) - the driver that sequences every
+//! stage into PCM.
 //!
 //! Per frame, in bitstream order: silence flag → post-filter parameters →
 //! transient flag → intra flag → coarse energy → time/frequency resolution →
@@ -46,16 +46,16 @@ const COMBFILTER_MINPERIOD: usize = 15;
 /// First-order pre-emphasis coefficient of the standard mode (`preemph`).
 const PREEMPH_COEF: f32 = 0.850_006_1;
 
-/// Spreading decision ICDF (`spread_icdf`, celt.h).
+/// Spreading decision ICDF (`spread_icdf`).
 const SPREAD_ICDF: [u8; 4] = [25, 23, 2, 0];
 
-/// Allocation trim ICDF (`trim_icdf`, celt.h).
+/// Allocation trim ICDF (`trim_icdf`).
 const TRIM_ICDF: [u8; 11] = [126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0];
 
-/// Post-filter tapset ICDF (`tapset_icdf`, celt.h).
+/// Post-filter tapset ICDF (`tapset_icdf`).
 const TAPSET_ICDF: [u8; 3] = [2, 1, 0];
 
-/// Time/frequency resolution change table (`tf_select_table`, celt.c),
+/// Time/frequency resolution change table (`tf_select_table`),
 /// indexed `[LM][4*isTransient + 2*tf_select + per_band_flag]`.
 pub(super) const TF_SELECT_TABLE: [[i32; 8]; 4] = [
     [0, -1, 0, -1, 0, -1, 0, -1],
@@ -64,7 +64,7 @@ pub(super) const TF_SELECT_TABLE: [[i32; 8]; 4] = [
     [0, -2, 0, -3, 3, 0, 1, -1],
 ];
 
-/// Comb-filter tap gains per tapset (`gains`, celt.c).
+/// Comb-filter tap gains per tapset (`gains`).
 pub(crate) const COMB_GAINS: [[f32; 3]; 3] = [
     [0.306_640_62, 0.217_041_02, 0.129_638_67],
     [0.463_867_2, 0.268_066_4, 0.0],
@@ -166,7 +166,7 @@ impl CeltDecoder {
     }
 
     /// The range coder's `rng` after the most recent frame - the
-    /// bit-exactness oracle (`OPUS_GET_FINAL_RANGE`); the noise seed is
+    /// bit-exactness oracle; the noise seed is
     /// reseeded from this same value per the reference.
     #[must_use]
     pub const fn final_range(&self) -> u32 {
@@ -184,7 +184,7 @@ impl CeltDecoder {
     ///
     /// Panics if `frame_size` is not 120, 240, 480 or 960 - the Opus layer
     /// guarantees this from the TOC.
-    #[allow(clippy::too_many_arguments, reason = "mirrors celt_decode_with_ec")]
+    #[allow(clippy::too_many_arguments, reason = "mirrors the reference decode sequence")]
     #[must_use]
     pub fn decode_frame(
         &mut self,
@@ -263,7 +263,7 @@ impl CeltDecoder {
         // Intra flag and coarse energy.
         let intra = tell + 3 <= total_bits && dec.decode_bit_logp(3);
         // Recovering from loss without intra energy: make the prediction
-        // safe to avoid loud artifacts (opus_decoder.c loss-recovery clamp).
+        // safe to avoid loud artifacts (loss-recovery clamp).
         if !intra && self.loss_duration != 0 {
             let safety = match lm {
                 0 => 1.5f32,
@@ -510,8 +510,8 @@ impl CeltDecoder {
             }
         }
 
-        // Reseed the noise generator from the range coder (the reference's
-        // `st->rng = dec->rng`); this is also the frame's final range value.
+        // Reseed the noise generator from the range coder; this is also the
+        // frame's final range value.
         self.rng = dec.range_size();
 
         // De-emphasis into interleaved PCM (float API scale: 1/32768).
@@ -727,7 +727,7 @@ impl CeltDecoder {
     }
 
     /// De-emphasis of the newest `n` history samples into interleaved PCM,
-    /// decimating by `downsample` (`deemphasis` in celt_decoder.c).
+    /// decimating by `downsample`.
     fn deemphasis(&mut self, n: usize) -> Vec<f32> {
         let cc = self.channels;
         let out_base = DECODE_BUFFER_SIZE - n;
@@ -761,7 +761,7 @@ impl CeltDecoder {
     /// `celt_synthesis`: denormalises the band shapes against the energy
     /// state, converts stream to decoder channels, and runs the inverse
     /// MDCTs into the (already shifted) history ring.
-    #[allow(clippy::too_many_arguments, reason = "mirrors celt_synthesis")]
+    #[allow(clippy::too_many_arguments, reason = "mirrors the reference synthesis sequence")]
     fn synthesis(
         &mut self,
         x: &[f32],
@@ -887,8 +887,7 @@ fn denormalise_band_energies(
     }
 }
 
-/// `2^x` matching the reference float build's `celt_exp2`
-/// (`exp(0.6931471805599453094 * x)`).
+/// `2^x` (`exp(0.6931471805599453094 * x)`).
 fn exp2f(x: f32) -> f32 {
     (core::f64::consts::LN_2 * f64::from(x)).exp() as f32
 }
@@ -941,7 +940,7 @@ fn tf_decode(
 ///
 /// Operates in place on `mem[base..base+n]`, reading up to
 /// `max(t0, t1) + 2` samples of history before `base`.
-#[allow(clippy::too_many_arguments, reason = "mirrors the reference comb_filter signature")]
+#[allow(clippy::too_many_arguments, reason = "mirrors the reference comb-filter signature")]
 fn comb_filter(
     mem: &mut [f32],
     base: usize,

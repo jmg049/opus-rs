@@ -1,6 +1,5 @@
 //! Static data of the standard CELT mode (48 kHz, 960-sample MDCT with 2.5,
-//! 5, 10, and 20 ms frames) - RFC 6716 Table 55 and the normative
-//! `modes.c`/`static_modes_*.h`.
+//! 5, 10, and 20 ms frames) - RFC 6716 Table 55.
 //!
 //! Opus uses exactly one CELT mode; the "custom modes" of the reference
 //! implementation are not part of RFC 6716 and are not represented here.
@@ -47,7 +46,7 @@ pub const BETA_COEF: [f32; 4] = [
 /// Frequency-domain prediction feedback for intra frames (Q15: 4915/32768).
 pub const BETA_INTRA: f32 = 4915.0 / 32768.0;
 
-/// Maximum number of fine energy bits per band (`MAX_FINE_BITS`, rate.h).
+/// Maximum number of fine energy bits per band (`MAX_FINE_BITS`).
 pub const MAX_FINE_BITS: i32 = 8;
 
 /// Laplace probability model for coarse energy deltas

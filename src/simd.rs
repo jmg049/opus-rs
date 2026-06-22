@@ -1,8 +1,8 @@
 //! SIMD dot-product primitives shared by the hot analysis loops (CELT pitch
 //! search, SILK LPC/pitch correlation). The kernels are the dominant encoder
-//! cost - `celt_pitch_xcorr` alone is ~two thirds of CELT encode - and map
-//! directly to fused multiply-add, so this is where the encoder closes the gap
-//! to libopus's hand-written SIMD.
+//! cost - the pitch cross-correlation alone is ~two thirds of CELT encode - and
+//! map directly to fused multiply-add, which is where most of the encoder's
+//! SIMD speedup comes from.
 //!
 //! All entry points are safe wrappers that pick the widest available kernel at
 //! runtime (AVX2+FMA → SSE2 → scalar) and fall back to scalar off x86-64. They
@@ -52,9 +52,9 @@ pub(crate) fn dual_dot(x: &[f32], y1: &[f32], y2: &[f32]) -> (f32, f32) {
     }
 }
 
-/// Cross-correlation `out[i] = Σ_j x[j]·y[i+j]` for `i` in `0..out.len()`
-/// (`celt_pitch_xcorr`). Computes four lags per pass so each `x` block is
-/// loaded once and shared across them (libopus's `xcorr_kernel`), instead of an
+/// Cross-correlation `out[i] = Σ_j x[j]·y[i+j]` for `i` in `0..out.len()`.
+/// Computes four lags per pass so each `x` block is
+/// loaded once and shared across them, instead of an
 /// independent dot per lag. `y` must be at least `out.len() + len - 1` long.
 #[cfg_attr(target_arch = "x86_64", allow(unsafe_code))]
 pub(crate) fn pitch_xcorr(x: &[f32], y: &[f32], out: &mut [f32], len: usize) {
@@ -124,8 +124,8 @@ unsafe fn pitch_xcorr_avx2(x: &[f32], y: &[f32], out: &mut [f32], len: usize) {
 
 /// 6-tap FIR: `out[j] = Σ_{k=0..6} inp[j+k]·c[k]` for `j` in `0..out.len()`.
 /// `inp` must be at least `out.len() + 5` long. Used by the CELT pitch
-/// downsampler's whitening filter (`celt_fir5`, expressed with an explicit
-/// 5-sample input history so it is a forward convolution).
+/// downsampler's whitening filter, expressed with an explicit
+/// 5-sample input history so it is a forward convolution.
 #[cfg_attr(target_arch = "x86_64", allow(unsafe_code))]
 pub(crate) fn fir6(out: &mut [f32], inp: &[f32], c: [f32; 6]) {
     debug_assert!(inp.len() >= out.len() + 5);

@@ -1,4 +1,4 @@
-//! The noise-shaping quantiser (RFC 6716 §5.2.3; normative `silk/NSQ.c`).
+//! The noise-shaping quantiser (RFC 6716 §5.2.3).
 //!
 //! NSQ turns the per-subframe input into the coded excitation `pulses`: for
 //! each sample it forms the short-term (LPC) and long-term (LTP) prediction,
@@ -9,7 +9,7 @@
 //! synthesises from the same pulses, gains and prediction coefficients -
 //! which is the round-trip oracle used to test it.
 //!
-//! Fixed-point throughout, mirroring `silk_NSQ_c` and its helpers.
+//! Fixed-point throughout.
 
 extern crate alloc;
 use alloc::vec;
@@ -131,7 +131,7 @@ fn short_prediction(buf: &[i32], base: usize, coef_rev: &[i16]) -> i32 {
 /// `silk_NSQ_noise_shape_feedback_loop`: AR shaping with the shift-register
 /// state `data1` (`sAR2_Q14`), driven by the new sample `data0`. Returns Q12.
 ///
-/// Mirrors libopus's `silk_NSQ_noise_shape_feedback_loop_c`: the right-shift of
+/// The right-shift of
 /// the AR state (prepend `data0`, drop the last tap) is fused with the dot in a
 /// single in-place pass using two rolling temporaries - no scratch array and no
 /// `copy_from_slice`. The accumulation order (`coef[0]·data0`, then
@@ -216,7 +216,7 @@ fn nsq_scale_states(
 }
 
 /// Rate-distortion candidate table, indexed by `q1_Q0 + 32` (`q1_Q0` ∈
-/// [-32, 31]). Mirrors libopus's `silk_NSQ_sse4_1` `table[64][4]`: each row is
+/// [-32, 31]). Each row is
 /// `[q1_Q10, q2_Q10, 2·(q1-q2), (rd1-rd2)+(q1²-q2²)]`, so the per-sample choice
 /// collapses to one lookup, one multiply and one compare. The decision
 /// `r·row[2] - row[3] < 0` is algebraically identical to the branchy

@@ -1,5 +1,5 @@
 //! The Laplace-distributed symbol coder used for CELT coarse energy
-//! (RFC 6716 §4.3.2.1; normative reference `laplace.c`).
+//! (RFC 6716 §4.3.2.1).
 //!
 //! Coarse energy prediction errors approximately follow a Laplace
 //! distribution. The coder models it with a geometric decay: symbol 0 has

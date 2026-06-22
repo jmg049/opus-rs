@@ -1,5 +1,4 @@
-//! Per-frame SILK encode assembly (RFC 6716 §5.2; normative
-//! `silk/float/encode_frame_FLP.c`).
+//! Per-frame SILK encode assembly (RFC 6716 §5.2).
 //!
 //! [`SilkChannelEncoder::encode_frame`] is the end-to-end SILK encode path:
 //! it ties the analysis and quantisation kernels into a single coded frame
@@ -75,8 +74,8 @@ pub(crate) struct SilkChannelEncoder {
     pub fs_khz: i32,
     pub nb_subfr: usize,
     /// Encode complexity 0-10; selects the pitch-search depth/threshold/order
-    /// per libopus's table (the rest of the analysis is already its low-
-    /// complexity configuration: plain NSQ, no warping).
+    /// (the rest of the analysis is already its low-complexity configuration:
+    /// plain NSQ, no warping).
     pub complexity: u8,
     /// Per-frame work buffers, reused across frames to avoid reallocating (and
     /// re-zeroing) them every call: pitch-analysis input/residual, the aligned
@@ -177,7 +176,7 @@ impl SilkChannelEncoder {
         // Pitch analysis: whiten and search for the lag. `pitch_x_buf` holds
         // `ltp_mem_length` of history, the frame, then `la_pitch` lookahead;
         // an isolated frame zero-pads the history and lookahead.
-        // Pitch-search settings from the complexity (libopus's table): the
+        // Pitch-search settings from the complexity: the
         // estimation complexity (0/1/2), the voicing threshold, and the
         // whitening LPC order (capped at the prediction order).
         let (pe_complexity, search_thres, pe_lpc_order): (usize, f32, usize) = match self.complexity {
@@ -455,8 +454,8 @@ impl SilkChannelEncoder {
             self.prev_input[ltp_mem_length - frame_length..].copy_from_slice(input);
         }
 
-        // NSQ + entropy coding. With `max_bits` set (hybrid), this is libopus's
-        // per-frame rate-control loop (`silk_encode_frame_FLP`): the first
+        // NSQ + entropy coding. With `max_bits` set (hybrid), this is the
+        // per-frame rate-control loop: the first
         // attempt uses the gains from `process_gains`; if it busts the cap, the
         // unquantised gains are scaled coarser by a multiplier - geometrically
         // until the over/under budget is bracketed, then bisection-interpolated

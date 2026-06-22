@@ -1,11 +1,11 @@
-//! Public SILK encoder driver (RFC 6716 §5.2; normative `silk/enc_API.c`).
+//! Public SILK encoder driver (RFC 6716 §5.2).
 //!
 //! [`SilkEncoder`] (mono) and [`SilkStereoEncoder`] (mid/side) wrap the
 //! per-frame [`SilkChannelEncoder`] with the SILK payload framing: the
 //! per-frame VAD flags and the LBRR flag(s) precede the coded frames. Both
 //! handle 10/20 ms (one frame) and 40/60 ms (two/three 20 ms frames, the
 //! later ones conditionally coded) and produce a range-coded SILK payload
-//! that [`crate::silk::SilkDecoder`] (and libopus) decode. The stereo path
+//! that [`crate::silk::SilkDecoder`] decodes. The stereo path
 //! runs the LR→MS analysis, codes the predictor weights and per-frame
 //! mid-only flag, and conditionally codes the side channel (with the
 //! mid-only→side transition reset). Frames are always coded active (no DTX)

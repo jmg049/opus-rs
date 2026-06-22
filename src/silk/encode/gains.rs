@@ -1,5 +1,4 @@
-//! Gain processing for the SILK encoder (RFC 6716 §5.2; normative
-//! `silk/float/process_gains_FLP.c`).
+//! Gain processing for the SILK encoder (RFC 6716 §5.2).
 //!
 //! [`process_gains`] turns the raw per-subframe gains (and residual
 //! energies) into the quantised gains the noise-shaping quantiser uses: it
@@ -14,7 +13,7 @@ use super::super::gains::gains_quant;
 use super::super::indices::{CondCoding, MAX_NB_SUBFR, TYPE_VOICED};
 use super::super::tables::QUANTIZATION_OFFSETS_Q10;
 
-// Rate-distortion `lambda` tuning constants (`tuning_parameters.h`).
+// Rate-distortion `lambda` tuning constants.
 const LAMBDA_OFFSET: f32 = 1.2;
 const LAMBDA_SPEECH_ACT: f32 = -0.2;
 const LAMBDA_DELAYED_DECISIONS: f32 = -0.05;

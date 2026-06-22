@@ -1,5 +1,4 @@
-//! Noise-shaping analysis for the SILK encoder (RFC 6716 §5.2; normative
-//! `silk/float/noise_shape_analysis_FLP.c`).
+//! Noise-shaping analysis for the SILK encoder (RFC 6716 §5.2).
 //!
 //! [`noise_shape_analysis`] derives the per-subframe noise-shaping
 //! parameters the noise-shaping quantiser uses to colour the quantisation
@@ -10,10 +9,10 @@
 //! also picks the sparseness-driven quantiser offset type.
 //!
 //! This is the float analysis half; its outputs are converted to the Q
-//! formats [`super::nsq`] consumes here, matching `silk_NSQ_wrapper_FLP`.
+//! formats [`super::nsq`] consumes here.
 //!
-//! The warped-filter path (used by the reference at complexity ≥ 5, which
-//! routes through `NSQ_del_dec`) is implemented for completeness, but the
+//! The warped-filter path (used by the reference at complexity ≥ 5) is
+//! implemented for completeness, but the
 //! encode driver currently selects the unwarped configuration so the plain
 //! [`super::nsq::nsq`] sees ordinary (non-warped) shaping coefficients.
 
@@ -27,7 +26,7 @@ pub(crate) const MAX_SHAPE_LPC_ORDER: usize = 24;
 /// `SHAPE_LPC_WIN_MAX` (15 ms × 16 kHz).
 const SHAPE_LPC_WIN_MAX: usize = 15 * 16;
 
-// Tuning parameters (`tuning_parameters.h`).
+// Tuning parameters.
 const BANDWIDTH_EXPANSION: f32 = 0.94;
 const FIND_PITCH_WHITE_NOISE_FRACTION: f32 = 1e-3;
 const SHAPE_WHITE_NOISE_FRACTION: f32 = 3e-5;

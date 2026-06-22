@@ -12,18 +12,18 @@
 //! Implemented so far, bottom-up - each kernel fully tested in isolation
 //! before the pipeline is assembled:
 //!
-//! | Module | Reference | Contents |
-//! |--------|-----------|----------|
-//! | [`laplace`] | `laplace.c`, §4.3.2.1 | the Laplace coder for coarse energy deltas |
-//! | [`cwrs`] | `cwrs.c`, §4.3.4.2 | PVQ codeword enumeration (pulse vectors ↔ indices) |
-//! | [`modes`] | `modes.c`, Table 55 | static data of the standard 48 kHz mode |
-//! | [`energy`] | `quant_bands.c`, §4.3.2 | coarse/fine/finalise energy envelope decoding |
-//! | [`rate`] | `rate.c`, §4.3.3 | the bit allocation: quality interpolation, band skipping, fine/shape split |
-//! | [`tables`] | `static_modes_*.h` | mechanically extracted allocation and pulse-cache tables |
-//! | [`vq`] | `vq.c`, §4.3.4.3 | spreading rotation, PVQ shape decoding, renormalisation |
-//! | [`bands`] | `bands.c`, §4.3.4 | the band loop: theta splits, stereo, folding, collapse masks |
-//! | [`mdct`] | `mdct.c`, §4.3.7 | the low-overlap MDCT (forward + backward) with the FFT backend seam |
-//! | [`decoder`] | `celt_decoder.c`, §4.3 | the frame driver: flags, post-filter, synthesis, de-emphasis |
+//! | Module | RFC | Contents |
+//! |--------|-----|----------|
+//! | [`laplace`] | §4.3.2.1 | the Laplace coder for coarse energy deltas |
+//! | [`cwrs`] | §4.3.4.2 | PVQ codeword enumeration (pulse vectors ↔ indices) |
+//! | [`modes`] | Table 55 | static data of the standard 48 kHz mode |
+//! | [`energy`] | §4.3.2 | coarse/fine/finalise energy envelope decoding |
+//! | [`rate`] | §4.3.3 | the bit allocation: quality interpolation, band skipping, fine/shape split |
+//! | [`tables`] | - | mechanically extracted allocation and pulse-cache tables |
+//! | [`vq`] | §4.3.4.3 | spreading rotation, PVQ shape decoding, renormalisation |
+//! | [`bands`] | §4.3.4 | the band loop: theta splits, stereo, folding, collapse masks |
+//! | [`mdct`] | §4.3.7 | the low-overlap MDCT (forward + backward) with the FFT backend seam |
+//! | [`decoder`] | §4.3 | the frame driver: flags, post-filter, synthesis, de-emphasis |
 
 pub mod bands;
 pub mod cwrs;

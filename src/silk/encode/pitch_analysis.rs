@@ -1,5 +1,4 @@
-//! Pitch (lag) estimation for the SILK encoder (RFC 6716 §5.2; normative
-//! `silk/float/pitch_analysis_core_FLP.c`).
+//! Pitch (lag) estimation for the SILK encoder (RFC 6716 §5.2).
 //!
 //! [`pitch_analysis_core`] decides voiced/unvoiced and, when voiced, finds
 //! the per-subframe pitch lags. It works in three stages of increasing
@@ -606,8 +605,7 @@ pub(crate) fn find_pitch_lags(
 mod tests {
     use super::*;
 
-    /// Bit-exact pin against the compiled reference
-    /// `silk_pitch_analysis_core_FLP` for a periodic 16 kHz frame.
+    /// Bit-exact pin against the reference for a periodic 16 kHz frame.
     #[test]
     fn pitch_core_matches_reference_pin() {
         let (fs_khz, nb) = (16i32, 4usize);
@@ -632,7 +630,7 @@ mod tests {
         assert!((ltp_corr - 0.998095).abs() < 1e-3, "LTPCorr {ltp_corr} off");
     }
 
-    /// Bit-exact pin against the compiled reference `silk_find_pitch_lags_FLP`
+    /// Bit-exact pin against the reference
     /// (replicated via the reference helper functions) for a periodic frame.
     #[test]
     fn find_pitch_lags_matches_reference_pin() {

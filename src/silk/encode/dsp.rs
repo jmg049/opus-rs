@@ -1,5 +1,5 @@
 //! Shared floating-point analysis kernels for the SILK encoder (RFC 6716
-//! §5.2; normative `silk/float/`). These small building blocks are used by
+//! §5.2). These small building blocks are used by
 //! more than one analysis stage (noise shaping, pitch analysis): the sine
 //! window, autocorrelation, the Schur recursion, reflection→prediction
 //! conversion, bandwidth expansion, an energy accumulator, and the LPC
@@ -99,10 +99,9 @@ pub(crate) fn lpc_analysis_filter_flp(r: &mut [f32], a: &[f32], s: &[f32], lengt
     // output sample. A vectorised `simd::dot` here loses: the per-call
     // horizontal fold does not amortise over so few taps and dwarfs the work
     // (it dominated `dot_avx2`). Dispatch on the (small, fixed) order to a
-    // const-generic inner loop the compiler fully unrolls - matching libopus's
-    // `silk_LPC_analysis_filterN_FLP` left-to-right order exactly (so
-    // bit-identical to the reference) - and pipelines across the independent
-    // output samples.
+    // const-generic inner loop the compiler fully unrolls - using the
+    // left-to-right accumulation order so it stays bit-identical to the
+    // reference - and pipelines across the independent output samples.
     match order {
         6 => filter_n::<6>(r, a, s, length),
         8 => filter_n::<8>(r, a, s, length),

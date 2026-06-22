@@ -1,6 +1,4 @@
-//! Side-information decoding (RFC 6716 §4.2.7.3-4.2.7.6; normative
-//! `decode_indices.c`, `NLSF_unpack.c`, table wiring from
-//! `decoder_set_fs.c`).
+//! Side-information decoding (RFC 6716 §4.2.7.3-4.2.7.6).
 //!
 //! Per SILK frame this decodes, in bitstream order: signal type and
 //! quantisation offset type, subframe gain indices (independent MSB+LSB or
@@ -36,7 +34,7 @@ pub(crate) const TYPE_NO_VOICE_ACTIVITY: i32 = 0;
 pub(crate) const TYPE_UNVOICED: i32 = 1;
 pub(crate) const TYPE_VOICED: i32 = 2;
 
-/// Conditional-coding mode for a frame (`CODE_*` in define.h).
+/// Conditional-coding mode for a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CondCoding {
     /// `CODE_INDEPENDENTLY`.
@@ -47,8 +45,7 @@ pub(crate) enum CondCoding {
     Conditionally,
 }
 
-/// One NLSF codebook (`silk_NLSF_CB_struct`): NB/MB (order 10) or WB
-/// (order 16).
+/// One NLSF codebook: NB/MB (order 10) or WB (order 16).
 pub(crate) struct NlsfCodebook {
     pub n_vectors: usize,
     pub order: usize,
@@ -66,7 +63,7 @@ pub(crate) struct NlsfCodebook {
     pub delta_min_q15: &'static [i16],
 }
 
-/// `silk_NLSF_CB_NB_MB`.
+/// The NB/MB NLSF codebook (order 10).
 pub(crate) const NLSF_CB_NB_MB: NlsfCodebook = NlsfCodebook {
     n_vectors: 32,
     order: 10,
@@ -82,7 +79,7 @@ pub(crate) const NLSF_CB_NB_MB: NlsfCodebook = NlsfCodebook {
     delta_min_q15: &NLSF_DELTA_MIN_NB_MB_Q15,
 };
 
-/// `silk_NLSF_CB_WB`.
+/// The WB NLSF codebook (order 16).
 pub(crate) const NLSF_CB_WB: NlsfCodebook = NlsfCodebook {
     n_vectors: 32,
     order: 16,
@@ -98,12 +95,12 @@ pub(crate) const NLSF_CB_WB: NlsfCodebook = NlsfCodebook {
     delta_min_q15: &NLSF_DELTA_MIN_WB_Q15,
 };
 
-/// The codebook for an internal rate (`decoder_set_fs.c`).
+/// The codebook for an internal rate.
 pub(crate) const fn nlsf_codebook(fs_khz: i32) -> &'static NlsfCodebook {
     if fs_khz == 16 { &NLSF_CB_WB } else { &NLSF_CB_NB_MB }
 }
 
-/// The pitch-lag low-bits iCDF for an internal rate (`decoder_set_fs.c`).
+/// The pitch-lag low-bits iCDF for an internal rate.
 pub(crate) const fn pitch_lag_low_bits_icdf(fs_khz: i32) -> &'static [u8] {
     match fs_khz {
         16 => &UNIFORM8_ICDF,
@@ -112,8 +109,7 @@ pub(crate) const fn pitch_lag_low_bits_icdf(fs_khz: i32) -> &'static [u8] {
     }
 }
 
-/// The pitch-contour iCDF for an internal rate and subframe count
-/// (`decoder_set_fs.c`).
+/// The pitch-contour iCDF for an internal rate and subframe count.
 pub(crate) const fn pitch_contour_icdf(fs_khz: i32, nb_subfr: usize) -> &'static [u8] {
     match (fs_khz == 8, nb_subfr == MAX_NB_SUBFR) {
         (true, true) => &PITCH_CONTOUR_NB_ICDF,
@@ -123,7 +119,7 @@ pub(crate) const fn pitch_contour_icdf(fs_khz: i32, nb_subfr: usize) -> &'static
     }
 }
 
-/// The LTP gain iCDF for a periodicity index (`silk_LTP_gain_iCDF_ptrs`).
+/// The LTP gain iCDF for a periodicity index.
 pub(crate) const fn ltp_gain_icdf(per_index: usize) -> &'static [u8] {
     match per_index {
         0 => &LTP_GAIN_ICDF_0,
@@ -132,7 +128,7 @@ pub(crate) const fn ltp_gain_icdf(per_index: usize) -> &'static [u8] {
     }
 }
 
-/// Decoded side information for one frame (`SideInfoIndices`).
+/// Decoded side information for one frame.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SideInfoIndices {
     pub gains_indices: [i8; MAX_NB_SUBFR],
@@ -148,16 +144,16 @@ pub(crate) struct SideInfoIndices {
     pub seed: i8,
 }
 
-/// Cross-frame entropy-coding state used by [`decode_indices`]
-/// (`ec_prevSignalType`/`ec_prevLagIndex` in `silk_decoder_state`).
+/// Cross-frame entropy-coding state used by [`decode_indices`]: the previous
+/// frame's signal type and lag index.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct EcPrevState {
     pub signal_type: i32,
     pub lag_index: i16,
 }
 
-/// `silk_NLSF_unpack`: per-coefficient entropy-table offsets and predictor
-/// values selected by the stage-one index.
+/// Per-coefficient entropy-table offsets and predictor values selected by
+/// the stage-one index.
 pub(crate) fn nlsf_unpack(cb: &NlsfCodebook, cb1_index: usize) -> ([i16; MAX_LPC_ORDER], [u8; MAX_LPC_ORDER]) {
     let mut ec_ix = [0i16; MAX_LPC_ORDER];
     let mut pred_q8 = [0u8; MAX_LPC_ORDER];
@@ -172,7 +168,7 @@ pub(crate) fn nlsf_unpack(cb: &NlsfCodebook, cb1_index: usize) -> ([i16; MAX_LPC
     (ec_ix, pred_q8)
 }
 
-/// `silk_decode_indices`: decodes all side information for one frame.
+/// Decodes all side information for one frame.
 ///
 /// `vad_flag` is this frame's VAD bit (or ignored when `decode_lbrr`);
 /// `prev` carries the previous frame's signal type and lag index for
@@ -267,12 +263,12 @@ pub(crate) fn decode_indices(
     ind
 }
 
-/// `silk_encode_indices`: writes one frame's side information - type/offset,
+/// Writes one frame's side information - type/offset,
 /// gains (delta or absolute), the NLSF VQ path, NLSF interpolation, and (for
 /// voiced frames) the pitch lag/contour, LTP gains/scaling - plus the LCG
 /// seed. The exact inverse of [`decode_indices`].
-#[allow(clippy::too_many_lines, reason = "mirrors the reference sequence")]
-#[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
+#[allow(clippy::too_many_lines, reason = "follows the bitstream sequence")]
+#[allow(clippy::too_many_arguments, reason = "decodes many independent fields")]
 pub(crate) fn encode_indices(
     enc: &mut crate::range::RangeEncoder,
     ind: &SideInfoIndices,

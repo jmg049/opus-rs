@@ -1,5 +1,4 @@
-//! Pitch analysis for the CELT pre-filter (RFC 6716 §5.3; normative
-//! `celt/pitch.c` and `celt/celt_lpc.c`, float build).
+//! Pitch analysis for the CELT pre-filter (RFC 6716 §5.3).
 //!
 //! The encoder estimates a pitch period and gain so the comb pre-filter can
 //! attenuate the strong harmonic structure of voiced/tonal signals before

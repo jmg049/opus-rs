@@ -1,6 +1,4 @@
-//! Decimating resamplers used by the pitch analysis (RFC 6716 §5.2;
-//! normative `silk/resampler_down2.c`, `silk/resampler_down2_3.c`,
-//! `silk/resampler_private_AR2.c`).
+//! Decimating resamplers used by the pitch analysis (RFC 6716 §5.2).
 //!
 //! Pitch estimation runs at 4 kHz (first stage) and 8 kHz (second stage),
 //! so the internal-rate frame is decimated by 2 (16→8, 8→4 kHz) with the
@@ -124,7 +122,7 @@ mod tests {
         core::array::from_fn(|i| ((i as i32 * 1237 + 11) % 9001 - 4500) as i16)
     }
 
-    /// Bit-exact pin against the compiled reference `silk_resampler_down2`.
+    /// Bit-exact pin against the reference.
     #[test]
     fn down2_matches_reference_pin() {
         let inp = pin_input();
@@ -139,7 +137,7 @@ mod tests {
         assert_eq!(s, [1_850_487, 176_361], "down2 state disagrees with reference");
     }
 
-    /// Bit-exact pin against the compiled reference `silk_resampler_down2_3`.
+    /// Bit-exact pin against the reference.
     #[test]
     fn down2_3_matches_reference_pin() {
         let inp = pin_input();

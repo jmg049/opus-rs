@@ -1,45 +1,36 @@
-//! SILK static tables (RFC 6716 §4.2; normative `silk/tables_*.c`).
+//! SILK static tables (RFC 6716 §4.2).
 //!
-//! Every array here was extracted mechanically from the reference sources
-//! (xiph/opus, `silk/tables_*.c`) by script - never hand-transcribed. The
-//! `_ICDF` tables are 8-bit inverse CDFs for the range decoder; Q-suffixed
-//! names keep the reference fixed-point scaling.
+//! Every array here was extracted mechanically by script - never
+//! hand-transcribed. The `_ICDF` tables are 8-bit inverse CDFs for the
+//! range decoder; Q-suffixed names keep the fixed-point scaling.
 
-#![allow(clippy::unreadable_literal, reason = "verbatim reference table values")]
+#![allow(clippy::unreadable_literal, reason = "verbatim table values")]
 #![allow(dead_code, reason = "consumed incrementally as the SILK decoder stages land")]
 
-// ── tables_LTP.c ───────────────────────────────────────────────────────────
+// ── LTP ──────────────────────────────────────────────────────────────────────
 
-/// `silk_LTP_per_index_iCDF`
 pub(crate) const LTP_PER_INDEX_ICDF: [u8; 3] = [179, 99, 0];
 
-/// `silk_LTP_gain_iCDF_0`
 pub(crate) const LTP_GAIN_ICDF_0: [u8; 8] = [71, 56, 43, 30, 21, 12, 6, 0];
 
-/// `silk_LTP_gain_iCDF_1`
 pub(crate) const LTP_GAIN_ICDF_1: [u8; 16] = [199, 165, 144, 124, 109, 96, 84, 71, 61, 51, 42, 32, 23, 15, 8, 0];
 
-/// `silk_LTP_gain_iCDF_2`
 pub(crate) const LTP_GAIN_ICDF_2: [u8; 32] = [
     241, 225, 211, 199, 187, 175, 164, 153, 142, 132, 123, 114, 105, 96, 88, 80, 72, 64, 57, 50, 44, 38, 33, 29, 24,
     20, 16, 12, 9, 5, 2, 0,
 ];
 
-/// `silk_LTP_gain_BITS_Q5_0`
 pub(crate) const LTP_GAIN_BITS_Q5_0: [u8; 8] = [15, 131, 138, 138, 155, 155, 173, 173];
 
-/// `silk_LTP_gain_BITS_Q5_1`
 pub(crate) const LTP_GAIN_BITS_Q5_1: [u8; 16] = [
     69, 93, 115, 118, 131, 138, 141, 138, 150, 150, 155, 150, 155, 160, 166, 160,
 ];
 
-/// `silk_LTP_gain_BITS_Q5_2`
 pub(crate) const LTP_GAIN_BITS_Q5_2: [u8; 32] = [
     131, 128, 134, 141, 141, 141, 145, 145, 145, 150, 155, 155, 155, 155, 160, 160, 160, 160, 166, 166, 173, 173, 182,
     192, 182, 192, 192, 192, 205, 192, 205, 224,
 ];
 
-/// `silk_LTP_gain_vq_0`
 pub(crate) const LTP_GAIN_VQ_0: [[i8; 5]; 8] = [
     [4, 6, 24, 7, 5],
     [0, 0, 2, 0, 0],
@@ -51,7 +42,6 @@ pub(crate) const LTP_GAIN_VQ_0: [[i8; 5]; 8] = [
     [16, 14, 38, -3, 33],
 ];
 
-/// `silk_LTP_gain_vq_1`
 pub(crate) const LTP_GAIN_VQ_1: [[i8; 5]; 16] = [
     [13, 22, 39, 23, 12],
     [-1, 36, 64, 27, -6],
@@ -71,7 +61,6 @@ pub(crate) const LTP_GAIN_VQ_1: [[i8; 5]; 16] = [
     [3, -1, 21, 16, 41],
 ];
 
-/// `silk_LTP_gain_vq_2`
 pub(crate) const LTP_GAIN_VQ_2: [[i8; 5]; 32] = [
     [-6, 27, 61, 39, 5],
     [-11, 42, 88, 4, 1],
@@ -107,25 +96,20 @@ pub(crate) const LTP_GAIN_VQ_2: [[i8; 5]; 32] = [
     [2, 0, 9, 10, 88],
 ];
 
-/// `silk_LTP_gain_vq_0_gain`
 pub(crate) const LTP_GAIN_VQ_0_GAIN: [u8; 8] = [46, 2, 90, 87, 93, 91, 82, 98];
 
-/// `silk_LTP_gain_vq_1_gain`
 pub(crate) const LTP_GAIN_VQ_1_GAIN: [u8; 16] =
     [109, 120, 118, 12, 113, 115, 117, 119, 99, 59, 87, 111, 63, 111, 112, 80];
 
-/// `silk_LTP_gain_vq_2_gain`
 pub(crate) const LTP_GAIN_VQ_2_GAIN: [u8; 32] = [
     126, 124, 125, 124, 129, 121, 126, 23, 132, 127, 127, 127, 126, 127, 122, 133, 130, 134, 101, 118, 119, 145, 126,
     86, 124, 120, 123, 119, 170, 173, 107, 109,
 ];
 
-/// `silk_LTP_vq_sizes`
 pub(crate) const LTP_VQ_SIZES: [i8; 3] = [8, 16, 32];
 
-// ── tables_NLSF_CB_NB_MB.c ─────────────────────────────────────────────────
+// ── NLSF codebook (NB/MB) ──────────────────────────────────────────────────
 
-/// `silk_NLSF_CB1_NB_MB_Q8`
 pub(crate) const NLSF_CB1_NB_MB_Q8: [u8; 320] = [
     12, 35, 60, 83, 108, 132, 157, 180, 206, 228, 15, 32, 55, 77, 101, 125, 151, 175, 201, 225, 19, 42, 66, 89, 114,
     137, 162, 184, 209, 230, 12, 25, 50, 72, 97, 120, 147, 172, 200, 223, 26, 44, 69, 90, 114, 135, 159, 180, 205, 225,
@@ -142,7 +126,6 @@ pub(crate) const NLSF_CB1_NB_MB_Q8: [u8; 320] = [
     30, 52, 84, 131, 150, 166, 186, 203, 229, 37, 48, 64, 84, 104, 118, 156, 177, 201, 230,
 ];
 
-/// `silk_NLSF_CB1_Wght_Q9`
 pub(crate) const NLSF_CB1_WGHT_Q9: [i16; 320] = [
     2897, 2314, 2314, 2314, 2287, 2287, 2314, 2300, 2327, 2287, 2888, 2580, 2394, 2367, 2314, 2274, 2274, 2274, 2274,
     2194, 2487, 2340, 2340, 2314, 2314, 2314, 2340, 2340, 2367, 2354, 3216, 2766, 2340, 2340, 2314, 2274, 2221, 2207,
@@ -163,14 +146,12 @@ pub(crate) const NLSF_CB1_WGHT_Q9: [i16; 320] = [
     2181, 2753, 2726, 2673, 2513, 2207, 2793, 3160, 2726, 2553, 2846, 2513, 2181, 2394, 2221, 2181,
 ];
 
-/// `silk_NLSF_CB1_iCDF_NB_MB`
 pub(crate) const NLSF_CB1_ICDF_NB_MB: [u8; 64] = [
     212, 178, 148, 129, 108, 96, 85, 82, 79, 77, 61, 59, 57, 56, 51, 49, 48, 45, 42, 41, 40, 38, 36, 34, 31, 30, 21,
     12, 10, 3, 1, 0, 255, 245, 244, 236, 233, 225, 217, 203, 190, 176, 175, 161, 149, 136, 125, 114, 102, 91, 81, 71,
     60, 52, 43, 35, 28, 20, 19, 18, 12, 11, 5, 0,
 ];
 
-/// `silk_NLSF_CB2_SELECT_NB_MB`
 pub(crate) const NLSF_CB2_SELECT_NB_MB: [u8; 160] = [
     16, 0, 0, 0, 0, 99, 66, 36, 36, 34, 36, 34, 34, 34, 34, 83, 69, 36, 52, 34, 116, 102, 70, 68, 68, 176, 102, 68, 68,
     34, 65, 85, 68, 84, 36, 116, 141, 152, 139, 170, 132, 187, 184, 216, 137, 132, 249, 168, 185, 139, 104, 102, 100,
@@ -181,31 +162,26 @@ pub(crate) const NLSF_CB2_SELECT_NB_MB: [u8; 160] = [
     154, 136, 104, 70, 164, 246, 171, 137, 139, 137, 155, 218, 219, 139,
 ];
 
-/// `silk_NLSF_CB2_iCDF_NB_MB`
 pub(crate) const NLSF_CB2_ICDF_NB_MB: [u8; 72] = [
     255, 254, 253, 238, 14, 3, 2, 1, 0, 255, 254, 252, 218, 35, 3, 2, 1, 0, 255, 254, 250, 208, 59, 4, 2, 1, 0, 255,
     254, 246, 194, 71, 10, 2, 1, 0, 255, 252, 236, 183, 82, 8, 2, 1, 0, 255, 252, 235, 180, 90, 17, 2, 1, 0, 255, 248,
     224, 171, 97, 30, 4, 1, 0, 255, 254, 236, 173, 95, 37, 7, 1, 0,
 ];
 
-/// `silk_NLSF_CB2_BITS_NB_MB_Q5`
 pub(crate) const NLSF_CB2_BITS_NB_MB_Q5: [u8; 72] = [
     255, 255, 255, 131, 6, 145, 255, 255, 255, 255, 255, 236, 93, 15, 96, 255, 255, 255, 255, 255, 194, 83, 25, 71,
     221, 255, 255, 255, 255, 162, 73, 34, 66, 162, 255, 255, 255, 210, 126, 73, 43, 57, 173, 255, 255, 255, 201, 125,
     71, 48, 58, 130, 255, 255, 255, 166, 110, 73, 57, 62, 104, 210, 255, 255, 251, 123, 65, 55, 68, 100, 171, 255,
 ];
 
-/// `silk_NLSF_PRED_NB_MB_Q8`
 pub(crate) const NLSF_PRED_NB_MB_Q8: [u8; 18] = [
     179, 138, 140, 148, 151, 149, 153, 151, 163, 116, 67, 82, 59, 92, 72, 100, 89, 92,
 ];
 
-/// `silk_NLSF_DELTA_MIN_NB_MB_Q15`
 pub(crate) const NLSF_DELTA_MIN_NB_MB_Q15: [i16; 11] = [250, 3, 6, 3, 3, 3, 4, 3, 3, 3, 461];
 
-// ── tables_NLSF_CB_WB.c ────────────────────────────────────────────────────
+// ── NLSF codebook (WB) ─────────────────────────────────────────────────────
 
-/// `silk_NLSF_CB1_WB_Q8`
 pub(crate) const NLSF_CB1_WB_Q8: [u8; 512] = [
     7, 23, 38, 54, 69, 85, 100, 116, 131, 147, 162, 178, 193, 208, 223, 239, 13, 25, 41, 55, 69, 83, 98, 112, 127, 142,
     157, 171, 187, 203, 220, 236, 15, 21, 34, 51, 61, 78, 92, 106, 126, 136, 152, 167, 185, 205, 225, 240, 10, 21, 36,
@@ -230,7 +206,6 @@ pub(crate) const NLSF_CB1_WB_Q8: [u8; 512] = [
     73, 86, 97, 110, 119, 129, 141, 175, 198, 218, 237,
 ];
 
-/// `silk_NLSF_CB1_WB_Wght_Q9`
 pub(crate) const NLSF_CB1_WB_WGHT_Q9: [i16; 512] = [
     3657, 2925, 2925, 2925, 2925, 2925, 2925, 2925, 2925, 2925, 2925, 2925, 2963, 2963, 2925, 2846, 3216, 3085, 2972,
     3056, 3056, 3010, 3010, 3010, 2963, 2963, 3010, 2972, 2888, 2846, 2846, 2726, 3920, 4014, 2981, 3207, 3207, 2934,
@@ -261,14 +236,12 @@ pub(crate) const NLSF_CB1_WB_WGHT_Q9: [i16; 512] = [
     2925, 2888, 3920, 3967, 3010, 3197, 3357, 3216, 3291, 3291, 3479, 3704, 3441, 2726, 2181, 2460, 2580, 2607,
 ];
 
-/// `silk_NLSF_CB1_iCDF_WB`
 pub(crate) const NLSF_CB1_ICDF_WB: [u8; 64] = [
     225, 204, 201, 184, 183, 175, 158, 154, 153, 135, 119, 115, 113, 110, 109, 99, 98, 95, 79, 68, 52, 50, 48, 45, 43,
     32, 31, 27, 18, 10, 3, 0, 255, 251, 235, 230, 212, 201, 196, 182, 167, 166, 163, 151, 138, 124, 110, 104, 90, 78,
     76, 70, 69, 57, 45, 34, 24, 21, 11, 6, 5, 4, 3, 0,
 ];
 
-/// `silk_NLSF_CB2_SELECT_WB`
 pub(crate) const NLSF_CB2_SELECT_WB: [u8; 256] = [
     0, 0, 0, 0, 0, 0, 0, 1, 100, 102, 102, 68, 68, 36, 34, 96, 164, 107, 158, 185, 180, 185, 139, 102, 64, 66, 36, 34,
     34, 0, 1, 32, 208, 139, 141, 191, 152, 185, 155, 104, 96, 171, 104, 166, 102, 102, 102, 132, 1, 0, 0, 0, 0, 16, 16,
@@ -282,107 +255,82 @@ pub(crate) const NLSF_CB2_SELECT_WB: [u8; 256] = [
     36, 0, 2, 33, 167, 138, 174, 102, 100, 84, 2, 2, 100, 107, 120, 119, 36, 197, 24, 0,
 ];
 
-/// `silk_NLSF_CB2_iCDF_WB`
 pub(crate) const NLSF_CB2_ICDF_WB: [u8; 72] = [
     255, 254, 253, 244, 12, 3, 2, 1, 0, 255, 254, 252, 224, 38, 3, 2, 1, 0, 255, 254, 251, 209, 57, 4, 2, 1, 0, 255,
     254, 244, 195, 69, 4, 2, 1, 0, 255, 251, 232, 184, 84, 7, 2, 1, 0, 255, 254, 240, 186, 86, 14, 2, 1, 0, 255, 254,
     239, 178, 91, 30, 5, 1, 0, 255, 248, 227, 177, 100, 19, 2, 1, 0,
 ];
 
-/// `silk_NLSF_CB2_BITS_WB_Q5`
 pub(crate) const NLSF_CB2_BITS_WB_Q5: [u8; 72] = [
     255, 255, 255, 156, 4, 154, 255, 255, 255, 255, 255, 227, 102, 15, 92, 255, 255, 255, 255, 255, 213, 83, 24, 72,
     236, 255, 255, 255, 255, 150, 76, 33, 63, 214, 255, 255, 255, 190, 121, 77, 43, 55, 185, 255, 255, 255, 245, 137,
     71, 43, 59, 139, 255, 255, 255, 255, 131, 66, 50, 66, 107, 194, 255, 255, 166, 116, 76, 55, 53, 125, 255, 255,
 ];
 
-/// `silk_NLSF_PRED_WB_Q8`
 pub(crate) const NLSF_PRED_WB_Q8: [u8; 30] = [
     175, 148, 160, 176, 178, 173, 174, 164, 177, 174, 196, 182, 198, 192, 182, 68, 62, 66, 60, 72, 117, 85, 90, 118,
     136, 151, 142, 160, 142, 155,
 ];
 
-/// `silk_NLSF_DELTA_MIN_WB_Q15`
 pub(crate) const NLSF_DELTA_MIN_WB_Q15: [i16; 17] = [100, 3, 40, 3, 3, 3, 5, 14, 14, 10, 11, 3, 8, 9, 7, 3, 347];
 
-// ── tables_gain.c ──────────────────────────────────────────────────────────
+// ── Gain ───────────────────────────────────────────────────────────────────
 
-/// `silk_gain_iCDF`
 pub(crate) const GAIN_ICDF: [[u8; 8]; 3] = [
     [224, 112, 44, 15, 3, 2, 1, 0],
     [254, 237, 192, 132, 70, 23, 4, 0],
     [255, 252, 226, 155, 61, 11, 2, 0],
 ];
 
-/// `silk_delta_gain_iCDF`
 pub(crate) const DELTA_GAIN_ICDF: [u8; 41] = [
     250, 245, 234, 203, 71, 50, 42, 38, 35, 33, 31, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13,
     12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
 ];
 
-// ── tables_other.c ─────────────────────────────────────────────────────────
+// ── Other ──────────────────────────────────────────────────────────────────
 
-/// `silk_stereo_pred_quant_Q13`
 pub(crate) const STEREO_PRED_QUANT_Q13: [i16; 16] = [
     -13732, -10050, -8266, -7526, -6500, -5000, -2950, -820, 820, 2950, 5000, 6500, 7526, 8266, 10050, 13732,
 ];
 
-/// `silk_stereo_pred_joint_iCDF`
 pub(crate) const STEREO_PRED_JOINT_ICDF: [u8; 25] = [
     249, 247, 246, 245, 244, 234, 210, 202, 201, 200, 197, 174, 82, 59, 56, 55, 54, 46, 22, 12, 11, 10, 9, 7, 0,
 ];
 
-/// `silk_stereo_only_code_mid_iCDF`
 pub(crate) const STEREO_ONLY_CODE_MID_ICDF: [u8; 2] = [64, 0];
 
-/// `silk_LBRR_flags_2_iCDF`
 pub(crate) const LBRR_FLAGS_2_ICDF: [u8; 3] = [203, 150, 0];
 
-/// `silk_LBRR_flags_3_iCDF`
 pub(crate) const LBRR_FLAGS_3_ICDF: [u8; 7] = [215, 195, 166, 125, 110, 82, 0];
 
-/// `silk_lsb_iCDF`
 pub(crate) const LSB_ICDF: [u8; 2] = [120, 0];
 
-/// `silk_LTPscale_iCDF`
 pub(crate) const LTPSCALE_ICDF: [u8; 3] = [128, 64, 0];
 
-/// `silk_type_offset_VAD_iCDF`
 pub(crate) const TYPE_OFFSET_VAD_ICDF: [u8; 4] = [232, 158, 10, 0];
 
-/// `silk_type_offset_no_VAD_iCDF`
 pub(crate) const TYPE_OFFSET_NO_VAD_ICDF: [u8; 2] = [230, 0];
 
-/// `silk_NLSF_interpolation_factor_iCDF`
 pub(crate) const NLSF_INTERPOLATION_FACTOR_ICDF: [u8; 5] = [243, 221, 192, 181, 0];
 
-/// `silk_Quantization_Offsets_Q10`
-// NOTE: the C body uses the OFFSET_*_Q10 macros from define.h; values
-// resolved manually (the script extracts numeric literals only).
+// NOTE: values resolved from the OFFSET_*_Q10 quantization-offset
+// constants (the script extracts numeric literals only).
 pub(crate) const QUANTIZATION_OFFSETS_Q10: [[i16; 2]; 2] = [[100, 240], [32, 100]];
 
-/// `silk_LTPScales_table_Q14`
 pub(crate) const LTPSCALES_TABLE_Q14: [i16; 3] = [15565, 12288, 8192];
 
-/// `silk_uniform3_iCDF`
 pub(crate) const UNIFORM3_ICDF: [u8; 3] = [171, 85, 0];
 
-/// `silk_uniform4_iCDF`
 pub(crate) const UNIFORM4_ICDF: [u8; 4] = [192, 128, 64, 0];
 
-/// `silk_uniform5_iCDF`
 pub(crate) const UNIFORM5_ICDF: [u8; 5] = [205, 154, 102, 51, 0];
 
-/// `silk_uniform6_iCDF`
 pub(crate) const UNIFORM6_ICDF: [u8; 6] = [213, 171, 128, 85, 43, 0];
 
-/// `silk_uniform8_iCDF`
 pub(crate) const UNIFORM8_ICDF: [u8; 8] = [224, 192, 160, 128, 96, 64, 32, 0];
 
-/// `silk_NLSF_EXT_iCDF`
 pub(crate) const NLSF_EXT_ICDF: [u8; 7] = [100, 40, 16, 7, 3, 1, 0];
 
-/// `silk_Transition_LP_B_Q28`
 pub(crate) const TRANSITION_LP_B_Q28: [[i32; 3]; 5] = [
     [250767114, 501534038, 250767114],
     [209867381, 419732057, 209867381],
@@ -391,7 +339,6 @@ pub(crate) const TRANSITION_LP_B_Q28: [[i32; 3]; 5] = [
     [89306658, 178584282, 89306658],
 ];
 
-/// `silk_Transition_LP_A_Q28`
 pub(crate) const TRANSITION_LP_A_Q28: [[i32; 2]; 5] = [
     [506393414, 239854379],
     [411067935, 169683996],
@@ -400,40 +347,32 @@ pub(crate) const TRANSITION_LP_A_Q28: [[i32; 2]; 5] = [
     [35497197, 57401098],
 ];
 
-// ── tables_pitch_lag.c ─────────────────────────────────────────────────────
+// ── Pitch lag ──────────────────────────────────────────────────────────────
 
-/// `silk_pitch_lag_iCDF`
 pub(crate) const PITCH_LAG_ICDF: [u8; 32] = [
     253, 250, 244, 233, 212, 182, 150, 131, 120, 110, 98, 85, 72, 60, 49, 40, 32, 25, 19, 15, 13, 11, 9, 8, 7, 6, 5, 4,
     3, 2, 1, 0,
 ];
 
-/// `silk_pitch_delta_iCDF`
 pub(crate) const PITCH_DELTA_ICDF: [u8; 21] = [
     210, 208, 206, 203, 199, 193, 183, 168, 142, 104, 74, 52, 37, 27, 20, 14, 10, 6, 4, 2, 0,
 ];
 
-/// `silk_pitch_contour_iCDF`
 pub(crate) const PITCH_CONTOUR_ICDF: [u8; 34] = [
     223, 201, 183, 167, 152, 138, 124, 111, 98, 88, 79, 70, 62, 56, 50, 44, 39, 35, 31, 27, 24, 21, 18, 16, 14, 12, 10,
     8, 6, 4, 3, 2, 1, 0,
 ];
 
-/// `silk_pitch_contour_NB_iCDF`
 pub(crate) const PITCH_CONTOUR_NB_ICDF: [u8; 11] = [188, 176, 155, 138, 119, 97, 67, 43, 26, 10, 0];
 
-/// `silk_pitch_contour_10_ms_iCDF`
 pub(crate) const PITCH_CONTOUR_10_MS_ICDF: [u8; 12] = [165, 119, 80, 61, 47, 35, 27, 20, 14, 9, 4, 0];
 
-/// `silk_pitch_contour_10_ms_NB_iCDF`
 pub(crate) const PITCH_CONTOUR_10_MS_NB_ICDF: [u8; 3] = [113, 63, 0];
 
-// ── tables_pulses_per_block.c ──────────────────────────────────────────────
+// ── Pulses per block ───────────────────────────────────────────────────────
 
-/// `silk_max_pulses_table`
 pub(crate) const MAX_PULSES_TABLE: [u8; 4] = [8, 10, 12, 16];
 
-/// `silk_pulses_per_block_iCDF`
 pub(crate) const PULSES_PER_BLOCK_ICDF: [[u8; 18]; 10] = [
     [125, 51, 26, 18, 15, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
     [198, 105, 45, 22, 15, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
@@ -453,7 +392,6 @@ pub(crate) const PULSES_PER_BLOCK_ICDF: [[u8; 18]; 10] = [
     [255, 254, 253, 247, 220, 162, 106, 67, 42, 28, 18, 12, 9, 6, 4, 3, 2, 0],
 ];
 
-/// `silk_pulses_per_block_BITS_Q5`
 pub(crate) const PULSES_PER_BLOCK_BITS_Q5: [[u8; 18]; 9] = [
     [
         31, 57, 107, 160, 205, 205, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
@@ -484,19 +422,16 @@ pub(crate) const PULSES_PER_BLOCK_BITS_Q5: [[u8; 18]; 9] = [
     ],
 ];
 
-/// `silk_rate_levels_iCDF`
 pub(crate) const RATE_LEVELS_ICDF: [[u8; 9]; 2] = [
     [241, 190, 178, 132, 87, 74, 41, 14, 0],
     [223, 193, 157, 140, 106, 57, 39, 18, 0],
 ];
 
-/// `silk_rate_levels_BITS_Q5`
 pub(crate) const RATE_LEVELS_BITS_Q5: [[u8; 9]; 2] = [
     [131, 74, 141, 79, 80, 138, 95, 104, 134],
     [95, 99, 91, 125, 93, 76, 123, 115, 123],
 ];
 
-/// `silk_shell_code_table0`
 pub(crate) const SHELL_CODE_TABLE0: [u8; 152] = [
     128, 0, 214, 42, 0, 235, 128, 21, 0, 244, 184, 72, 11, 0, 248, 214, 128, 42, 7, 0, 248, 225, 170, 80, 25, 5, 0,
     251, 236, 198, 126, 54, 18, 3, 0, 250, 238, 211, 159, 82, 35, 15, 5, 0, 250, 231, 203, 168, 128, 88, 53, 25, 6, 0,
@@ -506,7 +441,6 @@ pub(crate) const SHELL_CODE_TABLE0: [u8; 152] = [
     3, 1, 0, 255, 253, 249, 242, 229, 208, 180, 146, 110, 76, 48, 27, 14, 7, 3, 1, 0,
 ];
 
-/// `silk_shell_code_table1`
 pub(crate) const SHELL_CODE_TABLE1: [u8; 152] = [
     129, 0, 207, 50, 0, 236, 129, 20, 0, 245, 185, 72, 10, 0, 249, 213, 129, 42, 6, 0, 250, 226, 169, 87, 27, 4, 0,
     251, 233, 194, 130, 62, 20, 4, 0, 250, 236, 207, 160, 99, 47, 17, 3, 0, 255, 240, 217, 182, 131, 81, 41, 11, 1, 0,
@@ -516,7 +450,6 @@ pub(crate) const SHELL_CODE_TABLE1: [u8; 152] = [
     0, 255, 254, 250, 241, 226, 205, 177, 145, 111, 79, 51, 30, 15, 6, 2, 1, 0,
 ];
 
-/// `silk_shell_code_table2`
 pub(crate) const SHELL_CODE_TABLE2: [u8; 152] = [
     129, 0, 203, 54, 0, 234, 129, 23, 0, 245, 184, 73, 10, 0, 250, 215, 129, 41, 5, 0, 252, 232, 173, 86, 24, 3, 0,
     253, 240, 200, 129, 56, 15, 2, 0, 253, 244, 217, 164, 94, 38, 10, 1, 0, 253, 245, 226, 189, 132, 71, 27, 7, 1, 0,
@@ -526,7 +459,6 @@ pub(crate) const SHELL_CODE_TABLE2: [u8; 152] = [
     0, 255, 254, 252, 246, 234, 213, 183, 147, 109, 73, 43, 22, 10, 4, 2, 1, 0,
 ];
 
-/// `silk_shell_code_table3`
 pub(crate) const SHELL_CODE_TABLE3: [u8; 152] = [
     130, 0, 200, 58, 0, 231, 130, 26, 0, 244, 184, 76, 12, 0, 249, 214, 130, 43, 6, 0, 252, 232, 173, 87, 24, 3, 0,
     253, 241, 203, 131, 56, 14, 2, 0, 254, 246, 221, 167, 94, 35, 8, 1, 0, 254, 249, 232, 193, 130, 65, 23, 5, 1, 0,
@@ -536,19 +468,17 @@ pub(crate) const SHELL_CODE_TABLE3: [u8; 152] = [
     0, 255, 254, 253, 252, 239, 221, 194, 158, 117, 76, 42, 18, 4, 3, 2, 1, 0,
 ];
 
-/// `silk_shell_code_table_offsets`
 pub(crate) const SHELL_CODE_TABLE_OFFSETS: [u8; 17] =
     [0, 0, 2, 5, 9, 14, 20, 27, 35, 44, 54, 65, 77, 90, 104, 119, 135];
 
-/// `silk_sign_iCDF`
 pub(crate) const SIGN_ICDF: [u8; 42] = [
     254, 49, 67, 77, 82, 93, 99, 198, 11, 18, 24, 31, 36, 45, 255, 46, 66, 78, 87, 94, 104, 208, 14, 21, 32, 42, 51,
     66, 255, 94, 104, 109, 112, 115, 118, 248, 53, 69, 80, 88, 95, 102,
 ];
 
-// ── table_LSF_cos.c ─────────────────────────────────────────────────────
+// ── LSF cosine ──────────────────────────────────────────────────────────
 
-/// `silk_LSFCosTab_FIX_Q12`: piecewise-linear cos() for the LSF↔cos map.
+/// Piecewise-linear cos() for the LSF↔cos map.
 pub(crate) const LSF_COS_TAB_FIX_Q12: [i16; 129] = [
     8192, 8190, 8182, 8170, 8152, 8130, 8104, 8072, 8034, 7994, 7946, 7896, 7840, 7778, 7714, 7644, 7568, 7490, 7406,
     7318, 7226, 7128, 7026, 6922, 6812, 6698, 6580, 6458, 6332, 6204, 6070, 5934, 5792, 5648, 5502, 5352, 5198, 5040,
@@ -560,18 +490,15 @@ pub(crate) const LSF_COS_TAB_FIX_Q12: [i16; 129] = [
     -8152, -8170, -8182, -8190, -8192,
 ];
 
-// ── pitch_est_tables.c ──────────────────────────────────────────────────
+// ── Pitch estimation ────────────────────────────────────────────────────
 
-/// `silk_CB_lags_stage2_10_ms`
 pub(crate) const CB_LAGS_STAGE2_10_MS: [[i8; 3]; 2] = [[0, 1, 0], [0, 0, 1]];
 
-/// `silk_CB_lags_stage3_10_ms`
 pub(crate) const CB_LAGS_STAGE3_10_MS: [[i8; 12]; 2] = [
     [0, 0, 1, -1, 1, -1, 2, -2, 2, -2, 3, -3],
     [0, 1, 0, 1, -1, 2, -1, 2, -2, 3, -2, 3],
 ];
 
-/// `silk_CB_lags_stage2`
 pub(crate) const CB_LAGS_STAGE2: [[i8; 11]; 4] = [
     [0, 2, -1, -1, -1, 0, 0, 1, 1, 0, 1],
     [0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0],
@@ -579,7 +506,6 @@ pub(crate) const CB_LAGS_STAGE2: [[i8; 11]; 4] = [
     [0, -1, 2, 1, 0, 1, 1, 0, 0, -1, -1],
 ];
 
-/// `silk_CB_lags_stage3`
 pub(crate) const CB_LAGS_STAGE3: [[i8; 34]; 4] = [
     [
         0, 0, 1, -1, 0, 1, -1, 0, -1, 1, -2, 2, -2, -2, 2, -3, 2, 3, -3, -4, 3, -4, 4, 4, -5, 5, -6, -5, 6, -7, 6, 5,
@@ -601,28 +527,27 @@ pub(crate) const CB_LAGS_STAGE3: [[i8; 34]; 4] = [
 mod tests {
     use super::*;
 
-    /// Spot-pins across every source file, read independently from the
-    /// reference `silk/tables_*.c` - guarding the mechanical extraction
-    /// against parser regressions.
+    /// Spot-pins across every table group, read independently - guarding
+    /// the mechanical extraction against parser regressions.
     #[test]
     fn extracted_tables_match_reference_spot_values() {
-        // tables_gain.c
+        // Gain
         assert_eq!(GAIN_ICDF[0], [224, 112, 44, 15, 3, 2, 1, 0]);
         assert_eq!(GAIN_ICDF[2], [255, 252, 226, 155, 61, 11, 2, 0]);
         assert_eq!(DELTA_GAIN_ICDF[0], 250);
         assert_eq!(DELTA_GAIN_ICDF[40], 0);
-        // tables_LTP.c
+        // LTP
         assert_eq!(LTP_PER_INDEX_ICDF, [179, 99, 0]);
         assert_eq!(LTP_GAIN_VQ_0[0], [4, 6, 24, 7, 5]);
-        // tables_NLSF_CB_NB_MB.c
+        // NLSF codebook (NB/MB)
         assert_eq!(&NLSF_CB1_NB_MB_Q8[..3], [12, 35, 60]);
         assert_eq!(NLSF_CB1_NB_MB_Q8[319], 230);
-        // tables_other.c
+        // Other
         assert_eq!(STEREO_PRED_QUANT_Q13[0], -13732);
         assert_eq!(STEREO_PRED_QUANT_Q13[15], 13732);
-        // tables_pitch_lag.c
+        // Pitch lag
         assert_eq!(&PITCH_LAG_ICDF[..4], [253, 250, 244, 233]);
-        // tables_pulses_per_block.c
+        // Pulses per block
         assert_eq!(RATE_LEVELS_ICDF[0][0], 241);
         assert_eq!(RATE_LEVELS_ICDF[1][8], 0);
     }

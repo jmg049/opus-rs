@@ -1,23 +1,24 @@
 # Encoder - known limitations and future work
 
-The SILK/CELT/hybrid encoder is functional and competitive with libopus on
-real speech (within ~1 dB SNR at matched bitrate; see
+The SILK/CELT/hybrid encoder is functional and produces good quality on
+real speech (around 1 dB SNR at matched bitrate; see
 `examples/encoder_quality.rs`). The items below are deliberate
 simplifications or deferred refinements, with enough context to pick each up.
 
 ## SILK per-frame rate control (`silk/encode/frame.rs`)
 
-`encode_frame` enforces a hard `max_bits` cap (hybrid path) with libopus's
+`encode_frame` enforces a hard `max_bits` cap (hybrid path) with a
 gain-multiplier loop: scale the unquantised gains coarser until the coded
 frame fits, geometric until the over/under budget is bracketed, then
 bisection-interpolated toward the cap, restoring the best fitting attempt.
-Differences from the reference (`silk_encode_frame_FLP`):
+Known limitations:
 
 - **No zero-pulse "damage control."** When a frame still busts at the 4×
-  (`gainMult_Q8 == 1024`) ceiling, the reference zeroes all pulses and codes
-  mid gains as a last resort. We instead leave the frame over budget and let
-  `OpusEncoder::encode_auto` fall back to CELT-only for it. Reason: the
-  reference's damage control advances the NSQ state inconsistently with the
+  (`gainMult_Q8 == 1024`) ceiling, a full implementation would zero all pulses
+  and code mid gains as a last resort. We instead leave the frame over budget
+  and let
+  `OpusEncoder::encode_auto` fall back to CELT-only for it. Reason:
+  damage control advances the NSQ state inconsistently with the
   coded (zero) excitation, which would desync **our** decoder (our oracle is
   per-packet final-range equality). Doing it properly needs a decoder-style
   synthesis pass to resync the encoder NSQ state after zeroing the pulses.
@@ -29,7 +30,7 @@ Differences from the reference (`silk_encode_frame_FLP`):
 
 ## Hybrid SILK/CELT split (`encoder.rs`)
 
-- `compute_silk_rate_for_hybrid` ports libopus's rate table but only the
+- `compute_silk_rate_for_hybrid` uses a rate table but only the
   no-FEC column and the +300 bps super-wideband nudge; the FEC columns and
   the stereo -1000 bps tweak are unused (no FEC / stereo-hybrid cap yet).
 - `celt_floor` (the reserved CELT high-band byte share) is a heuristic
@@ -39,11 +40,11 @@ Differences from the reference (`silk_encode_frame_FLP`):
 ## DTX (`OpusEncoder::set_dtx`)
 
 Implemented: after 200 ms of inactivity `encode_auto` emits a 1-byte TOC-only
-packet (the decoder conceals it), with the libopus run bounds (≤ 400 ms, then
+packet (the decoder conceals it), with the standard run bounds (≤ 400 ms, then
 a refresh frame). Activity is an **adaptive energy detector** (`frame_active`)
 that tracks the background-noise floor, so DTX engages during noisy pauses, not
-just digital silence. It is still simpler than libopus's full SILK 4-band VAD
-/ analysis activity probability (`speech_activity_q8`, which would need a
+just digital silence. It is still simpler than a full SILK 4-band VAD
+/ analysis activity probability (which would need a
 separate VAD+resampler at the `OpusEncoder` level since it runs at the internal
 rate) - fine for DTX gating, but the SILK VAD would be marginally more accurate.
 

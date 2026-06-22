@@ -1,5 +1,4 @@
-//! Rate control for the SILK encoder (RFC 6716 §5.2; normative
-//! `silk/control_SNR.c`).
+//! Rate control for the SILK encoder (RFC 6716 §5.2).
 //!
 //! [`control_snr`] maps a target bitrate to the coding SNR (`SNR_dB_Q7`) that
 //! drives the noise-shaping gain control and the gain/lambda tuning. The
@@ -62,7 +61,7 @@ pub(crate) fn control_snr(fs_khz: i32, nb_subfr: usize, target_rate_bps: i32) ->
 mod tests {
     use super::*;
 
-    /// Bit-exact pins against the compiled reference `silk_control_SNR`.
+    /// Bit-exact pins against the reference.
     #[test]
     fn control_snr_matches_reference_pins() {
         // (fs_khz, nb_subfr, rate_bps, expected SNR_dB_Q7).

@@ -1,7 +1,5 @@
 //! Long-term (pitch) prediction analysis and gain quantisation for the SILK
-//! encoder (RFC 6716 §5.2; normative `silk/float/find_LTP_FLP.c`,
-//! `silk/float/corrMatrix_FLP.c`, `silk/quant_LTP_gains.c`,
-//! `silk/VQ_WMat_EC.c`).
+//! encoder (RFC 6716 §5.2).
 //!
 //! For a voiced subframe the encoder predicts the LPC residual from its own
 //! past (one pitch period back) with a 5-tap FIR. [`find_ltp`] forms the

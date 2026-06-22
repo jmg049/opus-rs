@@ -1,11 +1,11 @@
-//! The Opus decoder (RFC 6716 §4; normative `opus_decoder.c`): TOC
+//! The Opus decoder (RFC 6716 §4): TOC
 //! dispatch over the SILK and CELT decoders, hybrid operation, embedded
 //! redundancy, and mode-transition smoothing.
 //!
 //! Output is 48 kHz interleaved f32 (the float build's native form);
-//! [`OpusDecoder::decode_packet_i16`] converts exactly as `opus_demo`
-//! does. Packet-loss concealment is not yet ported: mode transitions that
-//! the reference smooths with a 5 ms concealment frame fade from silence
+//! [`OpusDecoder::decode_packet_i16`] converts to s16. Packet-loss
+//! concealment is not yet implemented: mode transitions that are normally
+//! smoothed with a 5 ms concealment frame fade from silence
 //! instead, which only affects 2.5 ms of audio at rare mode switches and
 //! never the entropy stream.
 
@@ -23,7 +23,7 @@ const F2_5: usize = 120;
 const F5: usize = 240;
 const F20: usize = 960;
 
-/// The CELT end band per bandwidth (`opus_decoder.c`).
+/// The CELT end band per bandwidth.
 const fn end_band(bw: Bandwidth) -> usize {
     match bw {
         Bandwidth::NarrowBand => 13,
@@ -58,14 +58,14 @@ pub struct OpusDecoder {
     prev_redundancy: bool,
     /// The CELT end band of the previous frame (for concealment).
     prev_end: usize,
-    /// Frame duration of the last good packet (`st->frame_size`), capping
-    /// each concealment chunk.
+    /// Frame duration of the last good packet, capping each concealment
+    /// chunk.
     last_frame_size: usize,
     /// The SILK control of the last good SILK/hybrid packet, reused for
     /// concealment.
     last_silk_ctl: Option<DecControl>,
-    /// The range state of the most recent packet
-    /// (`OPUS_GET_FINAL_RANGE`): main coder XOR redundant coder.
+    /// The range state of the most recent packet: main coder XOR redundant
+    /// coder.
     final_range: u32,
 }
 
@@ -81,7 +81,7 @@ impl OpusDecoder {
     }
 
     /// Creates a decoder producing `channels` at `fs_hz`
-    /// (48/24/16/12/8 kHz), like `opus_decoder_create`.
+    /// (48/24/16/12/8 kHz).
     ///
     /// # Panics
     ///
@@ -106,7 +106,7 @@ impl OpusDecoder {
         }
     }
 
-    /// The bit-exactness oracle (`OPUS_GET_FINAL_RANGE`).
+    /// The bit-exactness oracle.
     #[must_use]
     pub const fn final_range(&self) -> u32 {
         self.final_range
@@ -149,7 +149,7 @@ impl OpusDecoder {
     }
 
     /// Like [`decode_packet`](Self::decode_packet) but converting to s16
-    /// exactly as `opus_demo` (scale, saturate, round ties to even).
+    /// (scale, saturate, round ties to even).
     ///
     /// # Errors
     ///
@@ -163,8 +163,8 @@ impl OpusDecoder {
     }
 
     /// Conceals one lost packet of `frame_size` samples per channel
-    /// (10-60 ms), like `opus_decode(NULL)`. CELT concealment extrapolates
-    /// the last pitch period; SILK concealment is not yet ported, so
+    /// (10-60 ms). CELT concealment extrapolates
+    /// the last pitch period; SILK concealment is not yet implemented, so
     /// frames following SILK or hybrid packets fade to silence. The final
     /// range of a concealed packet is 0.
     ///
@@ -216,8 +216,8 @@ impl OpusDecoder {
             let mut done = 0usize;
             while done < frame_size {
                 // Each chunk is capped by the last good packet's frame
-                // duration, then quantised to a runnable size
-                // (opus_decode_frame's PLC sizing).
+                // duration, then quantised to a runnable size (the PLC
+                // sizing).
                 let mut n = (frame_size - done).min(self.last_frame_size);
                 if n > F20 {
                     n = F20;
@@ -248,9 +248,8 @@ impl OpusDecoder {
     }
 
     /// Decodes the in-band FEC (LBRR) data of `data` to recover a lost
-    /// packet of `frame_size` samples per channel, like
-    /// `opus_decode(..., decode_fec=1)`: everything except the FEC'd
-    /// duration is concealed, then the LBRR frame completes it. Falls back
+    /// packet of `frame_size` samples per channel: everything except the
+    /// FEC'd duration is concealed, then the LBRR frame completes it. Falls back
     /// to plain concealment when the packet cannot carry FEC (CELT-only
     /// modes or a shorter request).
     ///
@@ -323,8 +322,8 @@ impl OpusDecoder {
         Ok(out)
     }
 
-    /// `opus_decode_frame`, normal path (no FEC, no loss).
-    #[allow(clippy::too_many_lines, reason = "mirrors the reference sequence")]
+    /// Decodes one frame, normal path (no FEC, no loss).
+    #[allow(clippy::too_many_lines, reason = "the full frame decode sequence")]
     fn decode_frame(&mut self, data: &[u8], mode: Mode, bandwidth: Bandwidth, frame_size: usize) -> Vec<f32> {
         let channels = self.channels;
         let ds = self.ds;
@@ -394,7 +393,7 @@ impl OpusDecoder {
             };
             if redundancy {
                 celt_to_silk = dec.decode_bit_logp(1);
-                // Signed like the reference (`len` is `opus_int32`): a corrupt
+                // Signed arithmetic: a corrupt
                 // `redundancy_bytes > len` drives `len` negative, which the
                 // sanity check below catches - so compute in i64, never
                 // underflowing the `usize`.
@@ -418,7 +417,7 @@ impl OpusDecoder {
             }
         }
         // Redundancy supersedes the transition fade - the redundant frame
-        // provides the smoothing (`if (redundancy) transition = 0`).
+        // provides the smoothing.
         let transition = transition && !redundancy;
         if transition && mode != Mode::CeltOnly && self.prev_mode == Some(Mode::CeltOnly) {
             let n = F5.min(frame_size);

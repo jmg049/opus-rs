@@ -1,6 +1,4 @@
-//! The SILK resampler, decoder paths (normative `resampler.c`,
-//! `resampler_private_up2_HQ.c`, `resampler_private_IIR_FIR.c`,
-//! tables from `resampler_rom.h`).
+//! The SILK resampler, decoder paths.
 //!
 //! The decoder upsamples the internal 8/12/16 kHz signal to the API rate:
 //! a 2× allpass upsampler (three second-order allpass sections per phase
@@ -18,16 +16,14 @@ use alloc::vec;
 
 use super::math::{rshift_round, smlabb, smlawb, smulbb, smulwb, smulww};
 
-/// `RESAMPLER_ORDER_FIR_12`.
 const ORDER_FIR_12: usize = 8;
-/// `RESAMPLER_MAX_BATCH_SIZE_MS`.
 const MAX_BATCH_SIZE_MS: usize = 10;
 
-/// `silk_resampler_up2_hq_0` / `_1` (allpass coefficients per phase).
+/// Allpass coefficients per phase.
 const UP2_HQ_0: [i32; 3] = [1746, 14986, 39083 - 65536];
 const UP2_HQ_1: [i32; 3] = [6854, 25769, 55542 - 65536];
 
-/// `silk_resampler_frac_FIR_12`: interpolation fractions 1/24 .. 23/24.
+/// Interpolation fractions 1/24 .. 23/24.
 const FRAC_FIR_12: [[i16; 4]; 12] = [
     [189, -600, 617, 30567],
     [117, -159, -1070, 29704],
@@ -43,42 +39,42 @@ const FRAC_FIR_12: [[i16; 4]; 12] = [
     [-46, 425, -1375, 2996],
 ];
 
-/// `silk_Resampler_3_4_COEFS`: 2 AR2 taps then the FIR half-tables.
+/// 2 AR2 taps then the FIR half-tables.
 const COEFS_3_4: [i16; 29] = [
     -20694, -13867, -49, 64, 17, -157, 353, -496, 163, 11047, 22205, -39, 6, 91, -170, 186, 23, -896, 6336, 19928, -19,
     -36, 102, -89, -24, 328, -951, 2568, 15909,
 ];
 
-/// `silk_Resampler_2_3_COEFS`: 2 AR2 taps then the FIR half-tables.
+/// 2 AR2 taps then the FIR half-tables.
 const COEFS_2_3: [i16; 20] = [
     -14457, -14019, 64, 128, -122, 36, 310, -768, 584, 9267, 17733, 12, 128, 18, -142, 288, -117, -865, 4123, 14459,
 ];
 
-/// `silk_Resampler_1_2_COEFS`: 2 AR2 taps then the FIR half-tables.
+/// 2 AR2 taps then the FIR half-tables.
 const COEFS_1_2: [i16; 14] = [
     616, -14323, -10, 39, 58, -46, -84, 120, 184, -315, -541, 1284, 5380, 9024,
 ];
 
-/// `silk_Resampler_1_3_COEFS`: 2 AR2 taps then the 18 symmetric FIR taps
+/// 2 AR2 taps then the 18 symmetric FIR taps
 /// (`RESAMPLER_DOWN_ORDER_FIR2` = 36). Encoder front-end (48→16, 24→8).
 const COEFS_1_3: [i16; 20] = [
     16102, -15162, -13, 0, 20, 26, 5, -31, -43, -4, 65, 90, 7, -157, -248, -44, 593, 1583, 2612, 3271,
 ];
-/// `silk_Resampler_1_4_COEFS` (48→12).
+/// 48→12.
 const COEFS_1_4: [i16; 20] = [
     22500, -15099, 3, -14, -20, -15, 2, 25, 37, 25, -16, -71, -107, -79, 50, 292, 623, 982, 1288, 1464,
 ];
-/// `silk_Resampler_1_6_COEFS` (48→8).
+/// 48→8.
 const COEFS_1_6: [i16; 20] = [
     27540, -15257, 17, 12, 8, 1, -10, -22, -30, -32, -22, 3, 44, 100, 168, 243, 317, 381, 429, 455,
 ];
 
-/// `delay_matrix_dec[in][out]` over rates [8, 12, 16] × [8, 12, 16, 24, 48].
+/// Decoder delay matrix `[in][out]` over rates [8, 12, 16] × [8, 12, 16, 24, 48].
 const DELAY_MATRIX_DEC: [[i8; 5]; 3] = [[4, 0, 2, 0, 0], [0, 9, 4, 7, 4], [0, 3, 12, 7, 7]];
-/// `delay_matrix_enc[in][out]` over rates [8, 12, 16, 24, 48] × [8, 12, 16].
+/// Encoder delay matrix `[in][out]` over rates [8, 12, 16, 24, 48] × [8, 12, 16].
 const DELAY_MATRIX_ENC: [[i8; 3]; 5] = [[6, 0, 3], [0, 7, 3], [0, 1, 10], [0, 2, 6], [18, 10, 12]];
 
-/// `rateID`: [8000, 12000, 16000, 24000, 48000] → 0..=4.
+/// Rate ID: [8000, 12000, 16000, 24000, 48000] → 0..=4.
 const fn rate_id(r: i32) -> usize {
     ((((r >> 12) - (r > 16000) as i32) >> (r > 24000) as i32) - 1) as usize
 }
@@ -95,7 +91,7 @@ enum Method {
     DownFir,
 }
 
-/// Decoder-side resampler state (`silk_resampler_state_struct`).
+/// Decoder-side resampler state.
 #[derive(Debug, Clone)]
 pub(crate) struct Resampler {
     s_iir: [i32; 6],
@@ -115,7 +111,7 @@ pub(crate) struct Resampler {
 }
 
 impl Resampler {
-    /// `silk_resampler_init` (decoder direction): `fs_hz_in` must be 8, 12
+    /// Decoder direction: `fs_hz_in` must be 8, 12
     /// or 16 kHz; `fs_hz_out` 8-48 kHz, not below the input.
     pub fn new(fs_hz_in: i32, fs_hz_out: i32) -> Self {
         assert!(
@@ -181,7 +177,7 @@ impl Resampler {
         }
     }
 
-    /// `silk_resampler_init(forEnc=1)`: the encoder front-end resampler,
+    /// The encoder front-end resampler,
     /// converting the API rate `fs_hz_in` ∈ {8,12,16,24,48} kHz to the
     /// internal rate `fs_hz_out` ∈ {8,12,16} kHz. Adds the 1:3/1:4/1:6 down
     /// ratios the decoder direction never needs and uses the encoder delay
@@ -269,7 +265,7 @@ impl Resampler {
         (self.fs_out_khz * 1000) as i32
     }
 
-    /// `silk_resampler`: converts `input` (≥ 1 ms) to the output rate;
+    /// Converts `input` (≥ 1 ms) to the output rate;
     /// `out` receives `input.len() * fs_out / fs_in` samples.
     pub fn process(&mut self, out: &mut [i16], input: &[i16]) {
         let in_len = input.len();
@@ -311,7 +307,7 @@ impl Resampler {
         self.delay_buf[..self.input_delay].copy_from_slice(&input[in_len - self.input_delay..]);
     }
 
-    /// `silk_resampler_private_IIR_FIR`: 2× upsample then fractional FIR
+    /// 2× upsample then fractional FIR
     /// interpolation at `inv_ratio_q16`.
     fn iir_fir(&mut self, out: &mut [i16], input: &[i16]) {
         let mut buf = vec![0i16; 2 * self.batch_size + ORDER_FIR_12];
@@ -367,7 +363,7 @@ impl Resampler {
 }
 
 impl Resampler {
-    /// `silk_resampler_private_down_FIR`: a second-order AR filter (Q8)
+    /// A second-order AR filter (Q8)
     /// followed by polyphase FIR interpolation.
     fn down_fir(&mut self, out: &mut [i16], input: &[i16]) {
         let ord = self.fir_order;
@@ -444,7 +440,7 @@ impl Resampler {
     }
 }
 
-/// `silk_resampler_private_up2_HQ`: 2× allpass upsampler (Q10 state) -
+/// 2× allpass upsampler (Q10 state) -
 /// three allpass sections per phase, the last a notch just above Nyquist.
 fn up2_hq_into(s: &mut [i32; 6], out: &mut [i16], input: &[i16]) {
     for (k, &x) in input.iter().enumerate() {
@@ -493,7 +489,7 @@ mod down_tests {
 
     use super::*;
 
-    /// Pins from the compiled reference down-FIR paths (two consecutive
+    /// Reference pins for the down-FIR paths (two consecutive
     /// frames so the AR2/FIR/delay state carries): per frame, the first 8
     /// outputs then the last 2.
     #[test]
@@ -549,7 +545,7 @@ mod tests {
 
     use super::*;
 
-    /// Pins generated by compiling the reference resampler with this exact
+    /// Reference pins for this exact
     /// input over two consecutive 20 ms frames (so the delay buffer and
     /// filter states carry across calls). For each frame: the first 12
     /// output samples, then the last 3.
@@ -637,8 +633,8 @@ mod tests {
         }
     }
 
-    /// Encoder front-end resampler (`silk_resampler_init` forEnc=1), pinned
-    /// against the compiled reference over three consecutive 20 ms frames.
+    /// Encoder front-end resampler, pinned
+    /// against the reference over three consecutive 20 ms frames.
     /// For each frame: the first 8 output samples, then the last 4.
     #[test]
     fn encoder_matches_reference_pins() {
