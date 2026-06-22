@@ -29,6 +29,13 @@ pub struct SilkEncoder {
     final_range: u32,
     /// In-band FEC (LBRR) generation enabled (`OPUS_SET_INBAND_FEC`).
     use_inband_fec: bool,
+    /// Expected packet-loss percentage 0-100 (`PacketLoss_perc`): drives the
+    /// loss-robust LTP scaling and the LBRR gain increase.
+    packet_loss_perc: i32,
+    /// Whether the *previous* packet carried LBRR (`LBRR_in_previous_packet`).
+    /// Selects the LBRR gain increase: 7 on the first LBRR packet, otherwise a
+    /// `packet_loss_perc`-driven value.
+    lbrr_in_previous_packet: bool,
     /// The previous packet's coded frames (`indices`, `pulses`) captured for
     /// LBRR. In-band FEC carries a redundant copy of the *previous* packet's
     /// frame(s) in the current packet, so a lost packet can be recovered from
@@ -47,6 +54,8 @@ impl SilkEncoder {
             ch: SilkChannelEncoder::new(fs_khz, nb_subfr),
             final_range: 0,
             use_inband_fec: false,
+            packet_loss_perc: 0,
+            lbrr_in_previous_packet: false,
             lbrr_prev: Vec::new(),
         }
     }
@@ -54,6 +63,15 @@ impl SilkEncoder {
     /// Sets the target bitrate (bps), which maps to the per-frame coding SNR.
     pub fn set_bitrate(&mut self, bps: i32) {
         self.ch.set_bitrate(bps);
+    }
+
+    /// Sets the expected packet-loss percentage 0-100
+    /// (`OPUS_SET_PACKET_LOSS_PERC`). When > 0, independently coded voiced
+    /// frames raise their LTP scaling index for loss robustness, and any LBRR
+    /// copy is coded at a reduced rate (a larger gain increase).
+    pub fn set_packet_loss_perc(&mut self, perc: i32) {
+        self.packet_loss_perc = perc.clamp(0, 100);
+        self.ch.set_packet_loss_perc(perc);
     }
 
     /// Enables or disables in-band FEC (LBRR) generation. When enabled, each
@@ -163,6 +181,7 @@ impl SilkEncoder {
             "input must be a whole number of frames"
         );
         let n_frames = input.len() / frame_length;
+        self.ch.set_n_frames_per_packet(n_frames as i32);
 
         if !self.use_inband_fec {
             // Header: per-frame VAD flags (all active) then the LBRR flag (off).
@@ -177,6 +196,10 @@ impl SilkEncoder {
                 self.ch
                     .encode_frame(enc, &input[i * frame_length..(i + 1) * frame_length], cond, max_bits);
             }
+            // No LBRR emitted this packet; the next FEC packet (if any) starts
+            // fresh at the full gain increase.
+            self.lbrr_in_previous_packet = false;
+            self.lbrr_prev.clear();
             return;
         }
 
@@ -212,16 +235,33 @@ impl SilkEncoder {
             self.lbrr_prev.clear();
         }
 
+        // LBRR gain increase for *this* packet's redundant copies
+        // (`silk_control_codec`): 7 when the previous packet carried no LBRR
+        // (it was coded at a higher bitrate), otherwise reduced as the expected
+        // packet loss rises: max(7 - floor(perc * 0.4), 2). The current frames
+        // are encoded with this reduced-rate LBRR copy stashed for the *next*
+        // packet to emit. (With FEC off the copy is full-rate; here it is
+        // always on, so the increase is always applied.)
+        let lbrr_gain_increases = if self.lbrr_in_previous_packet {
+            (7 - ((self.packet_loss_perc * 26214) >> 16)).max(2) // SMULWB(perc, 0.4_Q16)
+        } else {
+            7
+        };
+        self.ch.set_lbrr_gain_increases(lbrr_gain_increases);
+        self.lbrr_in_previous_packet = true;
+
         // Analyze + emit the current frames, capturing each for next packet's
         // LBRR. `analyze_frame` advances the analysis/NSQ state and returns the
-        // coded indices+pulses; `emit_frame` then codes the regular frame.
+        // regular coded indices+pulses plus a reduced-rate LBRR copy;
+        // `emit_frame` then codes the regular frame. The LBRR copy (or the
+        // regular frame when the second NSQ pass is disabled) is stashed.
         let mut current: Vec<(super::super::indices::SideInfoIndices, Vec<i8>)> = Vec::with_capacity(n_frames);
         for i in 0..n_frames {
             let cond = if i == 0 { CondCoding::Independently } else { CondCoding::Conditionally };
             let f = &input[i * frame_length..(i + 1) * frame_length];
-            let (ind, pulses) = self.ch.analyze_frame(f, cond);
+            let ((ind, pulses), lbrr) = self.ch.analyze_frame(f, cond);
             self.ch.emit_frame(enc, &ind, &pulses, cond, false);
-            current.push((ind, pulses));
+            current.push(lbrr.unwrap_or((ind, pulses)));
         }
         self.lbrr_prev = current;
     }

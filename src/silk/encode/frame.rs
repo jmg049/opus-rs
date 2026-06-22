@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use crate::range::RangeEncoder;
 
-use super::super::gains::gains_quant;
+use super::super::gains::{gains_dequant, gains_quant};
 use super::super::indices::{
     CondCoding, EcPrevState, MAX_LPC_ORDER, MAX_NB_SUBFR, SideInfoIndices, TYPE_UNVOICED, TYPE_VOICED, encode_indices,
     nlsf_codebook,
@@ -66,6 +66,22 @@ pub(crate) struct SilkChannelEncoder {
     pub vad: VadState,
     /// Target bitrate (bps), mapped to the coding SNR per frame.
     pub target_rate_bps: i32,
+    /// Expected packet-loss percentage 0-100 (`PacketLoss_perc`). When > 0, an
+    /// independently-coded voiced frame raises its LTP scaling index to reduce
+    /// inter-frame prediction dependency (loss-robust coding).
+    pub packet_loss_perc: i32,
+    /// Number of SILK frames per Opus packet (`nFramesPerPacket`: 1 for
+    /// 10/20 ms, 2 for 40 ms, 3 for 60 ms), used by the LTP scaling selection.
+    pub n_frames_per_packet: i32,
+    /// Gain increase applied to the LBRR copy's first-subframe gain index
+    /// (`LBRR_GainIncreases`), so the redundant FEC copy costs fewer bits. 0
+    /// disables the reduced-rate LBRR pass (the copy then reuses the full-rate
+    /// pulses).
+    pub lbrr_gain_increases: i32,
+    /// Cross-frame LBRR gain-index accumulator (`LBRRprevLastGainIndex`), reset
+    /// at the first LBRR frame of a packet and carried across conditionally
+    /// coded LBRR frames.
+    pub lbrr_prev_last_gain_index: i8,
     /// True until the first frame after a reset has been coded; relaxes the
     /// maximum-prediction-gain cap (`first_frame_after_reset`).
     pub first_frame_after_reset: bool,
@@ -107,6 +123,10 @@ impl SilkChannelEncoder {
             prev_input: vec![0; 20 * fs_khz as usize],
             vad: VadState::new(),
             target_rate_bps: 30_000,
+            packet_loss_perc: 0,
+            n_frames_per_packet: 1,
+            lbrr_gain_increases: 0,
+            lbrr_prev_last_gain_index: 0,
             first_frame_after_reset: true,
             ec_prev: EcPrevState::default(),
             fs_khz,
@@ -125,6 +145,26 @@ impl SilkChannelEncoder {
     /// Sets the target bitrate (bps), which maps to the coding SNR per frame.
     pub(crate) fn set_bitrate(&mut self, bps: i32) {
         self.target_rate_bps = bps;
+    }
+
+    /// Sets the expected packet-loss percentage 0-100 (`PacketLoss_perc`),
+    /// clamped; > 0 enables loss-robust LTP scaling on independently coded
+    /// voiced frames.
+    pub(crate) fn set_packet_loss_perc(&mut self, perc: i32) {
+        self.packet_loss_perc = perc.clamp(0, 100);
+    }
+
+    /// Sets the number of SILK frames per packet (`nFramesPerPacket`), used by
+    /// the LTP scaling selection.
+    pub(crate) fn set_n_frames_per_packet(&mut self, n: i32) {
+        self.n_frames_per_packet = n.max(1);
+    }
+
+    /// Sets the LBRR first-subframe gain increase (`LBRR_GainIncreases`); 0
+    /// disables the reduced-rate LBRR pass (the copy reuses the full-rate
+    /// pulses).
+    pub(crate) fn set_lbrr_gain_increases(&mut self, g: i32) {
+        self.lbrr_gain_increases = g.max(0);
     }
 
     /// Sets the encode complexity 0-10 (clamped), selecting the pitch search.
@@ -160,7 +200,7 @@ impl SilkChannelEncoder {
         cond_coding: CondCoding,
         max_bits: Option<i32>,
     ) -> SideInfoIndices {
-        self.encode_frame_inner(enc, input, cond_coding, max_bits).0
+        self.encode_frame_inner(enc, input, cond_coding, max_bits, false).0
     }
 
     /// Runs analysis + NSQ for one frame and captures the coded `indices` and
@@ -171,20 +211,26 @@ impl SilkChannelEncoder {
     /// optionally as an LBRR copy first. This drives multi-frame FEC packets,
     /// where all LBRR frames precede all regular frames in the bitstream.
     ///
-    /// Returns the chosen `indices` and pulse vector.
+    /// Returns `(indices, pulses)` for the regular frame and, when
+    /// `lbrr_gain_increases > 0`, a reduced-rate LBRR copy `(indices, pulses)`
+    /// produced by a second NSQ pass with a raised first-subframe gain index
+    /// (`silk_LBRR_encode`). When the gain increase is 0 the LBRR copy is
+    /// `None` and the caller reuses the regular frame as the LBRR copy.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn analyze_frame(
         &mut self,
         input: &[i16],
         cond_coding: CondCoding,
-    ) -> (SideInfoIndices, Vec<i8>) {
+    ) -> ((SideInfoIndices, Vec<i8>), Option<(SideInfoIndices, Vec<i8>)>) {
         // Emit into a throwaway encoder; we only want the analysis state and the
         // captured indices/pulses. `ec_prev` is left as the pre-frame state
         // (the emission caller advances it).
         let ec_prev_pre = self.ec_prev;
         let mut sink = RangeEncoder::new(0);
-        let (indices, pulses) = self.encode_frame_inner(&mut sink, input, cond_coding, None);
+        let want_lbrr = self.lbrr_gain_increases > 0;
+        let (indices, pulses, lbrr) = self.encode_frame_inner(&mut sink, input, cond_coding, None, want_lbrr);
         self.ec_prev = ec_prev_pre;
-        (indices, pulses)
+        ((indices, pulses), lbrr)
     }
 
     /// Emits a previously [`analyze_frame`](Self::analyze_frame)d frame into
@@ -219,13 +265,15 @@ impl SilkChannelEncoder {
         );
     }
 
+    #[allow(clippy::type_complexity)]
     fn encode_frame_inner(
         &mut self,
         enc: &mut RangeEncoder,
         input: &[i16],
         cond_coding: CondCoding,
         max_bits: Option<i32>,
-    ) -> (SideInfoIndices, Vec<i8>) {
+        want_lbrr: bool,
+    ) -> (SideInfoIndices, Vec<i8>, Option<(SideInfoIndices, Vec<i8>)>) {
         let order = if self.fs_khz == 16 { 16 } else { 10 };
         let subfr_length = 5 * self.fs_khz as usize;
         let frame_length = self.nb_subfr * subfr_length;
@@ -469,8 +517,28 @@ impl SilkChannelEncoder {
             cond_coding,
         );
 
-        // LTP scaling: independent coding with no packet loss selects index 0.
-        let ltp_scale_index = 0i8;
+        // LTP scaling (`silk_LTP_scale_ctrl`): the first (independently coded)
+        // frame of a packet raises the LTP scaling index when packet loss is
+        // expected, reducing inter-frame prediction dependency so a lost frame
+        // damages fewer following frames. Conditionally coded frames always use
+        // index 0 (minimum scaling). With `packet_loss_perc == 0` (the default)
+        // we keep index 0 to stay byte-identical to the prior behaviour; the
+        // reference's `round_loss = perc + nFramesPerPacket` term would raise it
+        // even at zero loss, but that divergence is gated off here.
+        let ltp_scale_index = if self.packet_loss_perc > 0
+            && is_voiced
+            && cond_coding == CondCoding::Independently
+        {
+            // round_loss = PacketLoss_perc + nFramesPerPacket;
+            // LTP_scaleIndex = LIMIT(round_loss * LTPredCodGain * 0.1, 0, 2)
+            // (truncated toward zero on assignment to int8). `pred_gain_db`
+            // is the LTP prediction coding gain (`LTPredCodGain`).
+            let round_loss = self.packet_loss_perc + self.n_frames_per_packet;
+            let v = round_loss as f32 * pred_gain_db * 0.1;
+            v.clamp(0.0, 2.0) as i8
+        } else {
+            0i8
+        };
         let ltp_scale_q14 = if is_voiced {
             i32::from(LTPSCALES_TABLE_Q14[ltp_scale_index as usize])
         } else {
@@ -508,6 +576,62 @@ impl SilkChannelEncoder {
             indices.ltp_index = ltp_index;
             indices.ltp_scale_index = ltp_scale_index;
         }
+        indices.gains_indices[..self.nb_subfr].copy_from_slice(&gres.gains_indices[..self.nb_subfr]);
+
+        // LBRR (FEC redundant copy), `silk_LBRR_encode`: encode the excitation
+        // at a lower bitrate by raising the first-subframe gain index by
+        // `lbrr_gain_increases` (first LBRR frame of the packet only), then
+        // re-running NSQ on the *pre-frame* NSQ state with the re-dequantised,
+        // coarser gains. This runs before the regular NSQ loop so it sees the
+        // same pre-frame NSQ history the reference does. The LBRR copy is only
+        // decoded on packet loss (`decode_fec`); the regular frame below is
+        // unaffected.
+        let lbrr_out = if want_lbrr {
+            let mut lbrr_indices = indices.clone();
+            // First LBRR frame in the packet (independent coding) resets the
+            // accumulator and applies the gain bump; conditionally coded LBRR
+            // frames carry the accumulator and skip the bump.
+            if cond_coding == CondCoding::Independently {
+                self.lbrr_prev_last_gain_index = self.last_gain_index;
+                let bumped = i32::from(lbrr_indices.gains_indices[0]) + self.lbrr_gain_increases;
+                lbrr_indices.gains_indices[0] = bumped.min(63) as i8; // N_LEVELS_QGAIN - 1
+            }
+            // Re-dequantise the (bumped) gain indices to keep the encoder's
+            // gains in sync with what `decode_fec` will reconstruct.
+            let lbrr_gains_q16 = gains_dequant(
+                &lbrr_indices.gains_indices,
+                &mut self.lbrr_prev_last_gain_index,
+                cond_coding == CondCoding::Conditionally,
+                self.nb_subfr,
+            );
+            // Second NSQ pass on a clone of the pre-frame NSQ state, so the
+            // regular NSQ loop below still starts from the untouched state.
+            let mut lbrr_nsq = self.nsq.clone();
+            let mut lbrr_pulses = vec![0i8; frame_length];
+            nsq(
+                &mut lbrr_nsq,
+                &cfg,
+                signal_type,
+                quant_offset_type,
+                4,
+                seed,
+                input,
+                &mut lbrr_pulses,
+                &pred_coef,
+                &ltp_coef,
+                &shp.ar_q13,
+                &shp.harm_shape_gain_q14,
+                &shp.tilt_q14,
+                &shp.lf_shp_q14,
+                &lbrr_gains_q16,
+                &pitch_l,
+                lambda_q10,
+                ltp_scale_q14,
+            );
+            Some((lbrr_indices, lbrr_pulses))
+        } else {
+            None
+        };
 
         // Carry forward the pitch/voicing state and input history.
         self.prev_lag = if is_voiced { pitch_l[self.nb_subfr - 1] } else { 0 };
@@ -717,7 +841,7 @@ impl SilkChannelEncoder {
         self.scratch_x_buf = x_buf;
         self.scratch_lpc_in = lpc_in_pre;
         self.scratch_pulses = pulses;
-        (indices, pulses_out)
+        (indices, pulses_out, lbrr_out)
     }
 }
 

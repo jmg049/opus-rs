@@ -453,8 +453,12 @@ impl OpusEncoder {
     }
 
     /// Sets the expected packet-loss percentage 0-100
-    /// (`OPUS_SET_PACKET_LOSS_PERC`), clamped. Higher values bias the encoder
-    /// toward more loss-robust coding; it currently informs the FEC behaviour.
+    /// (`OPUS_SET_PACKET_LOSS_PERC`), clamped. Higher values bias the SILK
+    /// encoder toward loss-robust coding: an independently coded voiced frame
+    /// raises its LTP scaling index (less inter-frame prediction dependency, so
+    /// a lost frame damages fewer following frames), and any LBRR (FEC) copy is
+    /// coded at a reduced rate via a larger gain increase. At 0 (the default)
+    /// the output is unchanged.
     pub const fn set_packet_loss_perc(&mut self, perc: u8) {
         self.packet_loss_perc = if perc > 100 { 100 } else { perc };
     }
@@ -935,6 +939,7 @@ impl OpusEncoder {
             silk.set_bitrate(bitrate.clamp(5000, 80_000));
             silk.set_complexity(self.complexity);
             silk.set_inband_fec(self.use_inband_fec);
+            silk.set_packet_loss_perc(i32::from(self.packet_loss_perc));
             let internal = crate::silk::encode::resample_in::resample_48k(resampler, pcm);
             // Closed-loop rate control: fit the byte budget (less the TOC).
             let p = silk
@@ -2576,6 +2581,168 @@ mod tests {
             assert_eq!(out.len(), 960);
             assert_eq!(dec.final_range(), enc.final_range(), "range mismatch frame {f}");
         }
+    }
+
+    /// A continuous, strongly periodic (voiced) wideband tone used by the
+    /// packet-loss tests below. Each frame is phase-continuous with the next.
+    fn voiced_silk_frame(f: usize, spf: usize) -> Vec<f32> {
+        (0..spf)
+            .map(|i| {
+                let t = (f * spf + i) as f32 / 48_000.0;
+                0.4 * (2.0 * core::f32::consts::PI * 200.0 * t).sin()
+                    + 0.15 * (2.0 * core::f32::consts::PI * 400.0 * t).sin()
+            })
+            .collect()
+    }
+
+    /// `packet_loss_perc == 0` (the default) leaves SILK output byte-identical
+    /// to an encoder that never touched the knob - the loss-robust LTP scaling
+    /// is fully gated off at zero loss.
+    #[test]
+    fn packet_loss_perc_zero_is_byte_identical() {
+        let spf = 960usize; // 20 ms WB mono, voiced (exercises LTP scaling)
+        let mut plain = OpusEncoder::new(1);
+        plain.set_bandwidth(Bandwidth::WideBand);
+        plain.set_bitrate(Some(20_000));
+
+        let mut zero = OpusEncoder::new(1);
+        zero.set_bandwidth(Bandwidth::WideBand);
+        zero.set_bitrate(Some(20_000));
+        zero.set_packet_loss_perc(0);
+        assert_eq!(zero.packet_loss_perc(), 0);
+
+        for f in 0..8 {
+            let pcm = voiced_silk_frame(f, spf);
+            let p_plain = plain.encode_silk(&pcm, 1275).expect("encode");
+            let p_zero = zero.encode_silk(&pcm, 1275).expect("encode");
+            assert_eq!(p_plain, p_zero, "packet_loss_perc=0 packet {f} differs from default");
+            assert_eq!(plain.final_range(), zero.final_range(), "range differs frame {f}");
+        }
+    }
+
+    /// With `packet_loss_perc > 0`, an independently coded voiced frame raises
+    /// its LTP scaling index (loss-robust coding), producing a *different*
+    /// bitstream from the zero-loss encoder, yet every packet still decodes on
+    /// the `OpusDecoder` with a matching final range (the oracle stays in sync).
+    #[test]
+    fn packet_loss_perc_raises_ltp_scaling_and_round_trips() {
+        let spf = 960usize;
+        let mut zero = OpusEncoder::new(1);
+        zero.set_bandwidth(Bandwidth::WideBand);
+        zero.set_bitrate(Some(20_000));
+
+        let mut lossy = OpusEncoder::new(1);
+        lossy.set_bandwidth(Bandwidth::WideBand);
+        lossy.set_bitrate(Some(20_000));
+        lossy.set_packet_loss_perc(50);
+        assert_eq!(lossy.packet_loss_perc(), 50);
+
+        let mut dec = OpusDecoder::new(1);
+        let mut any_different = false;
+        for f in 0..8 {
+            let pcm = voiced_silk_frame(f, spf);
+            let p_zero = zero.encode_silk(&pcm, 1275).expect("encode");
+            let p_lossy = lossy.encode_silk(&pcm, 1275).expect("encode");
+            if p_zero != p_lossy {
+                any_different = true;
+            }
+            // The loss-robust packet still decodes with a matching oracle.
+            let out = dec.decode_packet(&p_lossy).expect("decode");
+            assert_eq!(out.len(), spf);
+            assert_eq!(
+                dec.final_range(),
+                lossy.final_range(),
+                "range mismatch on loss-robust packet {f}"
+            );
+        }
+        assert!(
+            any_different,
+            "packet_loss_perc>0 should change the voiced bitstream (LTP scaling)"
+        );
+    }
+
+    /// FEC recovery still works when `packet_loss_perc` is high: the LBRR copy
+    /// is coded at a reduced rate (a larger gain increase), but recovering a
+    /// lost packet from its successor still reconstructs audio that clearly
+    /// beats plain concealment, and every FEC packet round-trips on normal
+    /// decode with a matching final range.
+    #[test]
+    fn fec_recovery_survives_reduced_rate_lbrr() {
+        let spf = 960usize;
+        let make = |f: usize| -> Vec<f32> {
+            let freq = 180.0 + 90.0 * (f as f32);
+            (0..spf)
+                .map(|i| {
+                    let t = (f * spf + i) as f32 / 48_000.0;
+                    0.4 * (2.0 * core::f32::consts::PI * freq * t).sin()
+                        + 0.15 * (2.0 * core::f32::consts::PI * 2.0 * freq * t).sin()
+                })
+                .collect()
+        };
+        let encode_seq = |fec: bool, perc: u8| -> (Vec<Vec<u8>>, Vec<u32>) {
+            let mut enc = OpusEncoder::new(1);
+            enc.set_bandwidth(Bandwidth::WideBand);
+            enc.set_bitrate(Some(20_000));
+            enc.set_inband_fec(fec);
+            enc.set_packet_loss_perc(perc);
+            let packets: Vec<Vec<u8>> = (0..6).map(|f| enc.encode_silk(&make(f), 1275).expect("encode")).collect();
+            // Re-encode to collect the per-packet final ranges for the oracle.
+            let mut e2 = OpusEncoder::new(1);
+            e2.set_bandwidth(Bandwidth::WideBand);
+            e2.set_bitrate(Some(20_000));
+            e2.set_inband_fec(fec);
+            e2.set_packet_loss_perc(perc);
+            let ranges: Vec<u32> = (0..6)
+                .map(|f| {
+                    let _ = e2.encode_silk(&make(f), 1275).expect("encode");
+                    e2.final_range()
+                })
+                .collect();
+            (packets, ranges)
+        };
+        let (on, ranges) = encode_seq(true, 80);
+        let (off, _) = encode_seq(false, 80);
+
+        // Every FEC packet decodes normally with a matching oracle.
+        let mut dec_norm = OpusDecoder::new(1);
+        for (f, p) in on.iter().enumerate() {
+            let out = dec_norm.decode_packet(p).expect("normal decode");
+            assert_eq!(out.len(), spf);
+            assert_eq!(dec_norm.final_range(), ranges[f], "FEC normal-decode range mismatch {f}");
+        }
+
+        let recover = |packets: &[Vec<u8>]| -> Vec<f32> {
+            let mut dec = OpusDecoder::new(1);
+            for p in packets.iter().take(3) {
+                dec.decode_packet(p).expect("decode");
+            }
+            dec.decode_fec(&packets[4], spf).expect("decode_fec")
+        };
+        let rec = recover(&on);
+        let conc = recover(&off);
+        let orig = make(3);
+        let corr_of = |sig: &[f32]| -> f64 {
+            let frame = &sig[sig.len() - spf..];
+            (0..240usize)
+                .map(|d| {
+                    let (mut s, mut dot, mut e) = (0.0f64, 0.0f64, 0.0f64);
+                    for i in 0..spf - d {
+                        let a = f64::from(orig[i]);
+                        let b = f64::from(frame[i + d]);
+                        s += a * a;
+                        dot += a * b;
+                        e += b * b;
+                    }
+                    dot / (s.sqrt() * e.sqrt()).max(1e-9)
+                })
+                .fold(0.0f64, f64::max)
+        };
+        let (fec_corr, conceal_corr) = (corr_of(&rec), corr_of(&conc));
+        assert!(fec_corr > 0.6, "reduced-rate FEC correlation {fec_corr:.3} too low");
+        assert!(
+            fec_corr > conceal_corr + 0.05,
+            "reduced-rate FEC ({fec_corr:.3}) should still beat concealment ({conceal_corr:.3})"
+        );
     }
 }
 
