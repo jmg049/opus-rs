@@ -205,9 +205,45 @@ fn nsq_scale_states(
     }
 }
 
+/// Rate-distortion candidate table, indexed by `q1_Q0 + 32` (`q1_Q0` ∈
+/// [-32, 31]). Mirrors libopus's `silk_NSQ_sse4_1` `table[64][4]`: each row is
+/// `[q1_Q10, q2_Q10, 2·(q1-q2), (rd1-rd2)+(q1²-q2²)]`, so the per-sample choice
+/// collapses to one lookup, one multiply and one compare. The decision
+/// `r·row[2] - row[3] < 0` is algebraically identical to the branchy
+/// `rd2 < rd1` (with `rd = level·λ + (r-level)²`), so the pulses are bit-exact.
+fn build_rd_table(offset_q10: i32, lambda_q10: i32) -> [[i32; 4]; 64] {
+    let mut table = [[0i32; 4]; 64];
+    for (idx, row) in table.iter_mut().enumerate() {
+        let k = idx as i32 - 32;
+        let (q1, q2, rd1, rd2) = if k > 0 {
+            let q1 = offset_q10 + (k << 10) - QUANT_LEVEL_ADJUST_Q10;
+            let q2 = q1 + 1024;
+            (q1, q2, q1 * lambda_q10, q2 * lambda_q10)
+        } else if k == 0 {
+            let q1 = offset_q10;
+            let q2 = q1 + (1024 - QUANT_LEVEL_ADJUST_Q10);
+            (q1, q2, q1 * lambda_q10, q2 * lambda_q10)
+        } else if k == -1 {
+            let q2 = offset_q10;
+            let q1 = q2 - (1024 - QUANT_LEVEL_ADJUST_Q10);
+            (q1, q2, -q1 * lambda_q10, q2 * lambda_q10)
+        } else {
+            let q1 = offset_q10 + (k << 10) + QUANT_LEVEL_ADJUST_Q10;
+            let q2 = q1 + 1024;
+            (q1, q2, -q1 * lambda_q10, -q2 * lambda_q10)
+        };
+        row[0] = q1;
+        row[1] = q2;
+        row[2] = 2 * (q1 - q2);
+        row[3] = (rd1 - rd2) + (q1 * q1 - q2 * q2);
+    }
+    table
+}
+
 /// `silk_noise_shape_quantizer`: the per-sample RD quantiser for one
 /// subframe. `pxq_base` indexes `nsq.xq`; `pulses`/`xq_out` receive this
-/// subframe's results.
+/// subframe's results. `rd_table` is the precomputed RD candidate table
+/// ([`build_rd_table`]).
 #[allow(clippy::too_many_arguments, reason = "mirrors the reference signature")]
 fn noise_shape_quantizer(
     nsq: &mut NsqState,
@@ -226,6 +262,7 @@ fn noise_shape_quantizer(
     gain_q16: i32,
     lambda_q10: i32,
     offset_q10: i32,
+    rd_table: &[[i32; 4]; 64],
     length: usize,
     shaping_lpc_order: usize,
     predict_lpc_order: usize,
@@ -292,48 +329,26 @@ fn noise_shape_quantizer(
         }
         r_q10 = r_q10.clamp(-(31 << 10), 30 << 10);
 
-        // Two quantisation candidates and their rate-distortion.
-        let mut q1_q10 = r_q10 - offset_q10;
-        let mut q1_q0 = q1_q10 >> 10;
+        // Two quantisation candidates and their rate-distortion, via the
+        // precomputed table: compute `q1_Q0`, then one lookup + one multiply +
+        // one compare pick the level (bit-exact with the branchy `rd2 < rd1`).
+        let q1_q10_tmp = r_q10 - offset_q10;
+        let mut q1_q0 = q1_q10_tmp >> 10;
         if lambda_q10 > 2048 {
             let rdo_offset = lambda_q10 / 2 - 512;
-            if q1_q10 > rdo_offset {
-                q1_q0 = (q1_q10 - rdo_offset) >> 10;
-            } else if q1_q10 < -rdo_offset {
-                q1_q0 = (q1_q10 + rdo_offset) >> 10;
-            } else if q1_q10 < 0 {
+            if q1_q10_tmp > rdo_offset {
+                q1_q0 = (q1_q10_tmp - rdo_offset) >> 10;
+            } else if q1_q10_tmp < -rdo_offset {
+                q1_q0 = (q1_q10_tmp + rdo_offset) >> 10;
+            } else if q1_q10_tmp < 0 {
                 q1_q0 = -1;
             } else {
                 q1_q0 = 0;
             }
         }
-        let (q2_q10, rd1_q20, rd2_q20);
-        if q1_q0 > 0 {
-            q1_q10 = (q1_q0 << 10) - QUANT_LEVEL_ADJUST_Q10 + offset_q10;
-            q2_q10 = q1_q10 + 1024;
-            rd1_q20 = q1_q10 * lambda_q10;
-            rd2_q20 = q2_q10 * lambda_q10;
-        } else if q1_q0 == 0 {
-            q1_q10 = offset_q10;
-            q2_q10 = q1_q10 + (1024 - QUANT_LEVEL_ADJUST_Q10);
-            rd1_q20 = q1_q10 * lambda_q10;
-            rd2_q20 = q2_q10 * lambda_q10;
-        } else if q1_q0 == -1 {
-            q2_q10 = offset_q10;
-            q1_q10 = q2_q10 - (1024 - QUANT_LEVEL_ADJUST_Q10);
-            rd1_q20 = -q1_q10 * lambda_q10;
-            rd2_q20 = q2_q10 * lambda_q10;
-        } else {
-            q1_q10 = (q1_q0 << 10) + QUANT_LEVEL_ADJUST_Q10 + offset_q10;
-            q2_q10 = q1_q10 + 1024;
-            rd1_q20 = -q1_q10 * lambda_q10;
-            rd2_q20 = -q2_q10 * lambda_q10;
-        }
-        let rr = r_q10 - q1_q10;
-        let rd1 = rd1_q20 + rr * rr;
-        let rr = r_q10 - q2_q10;
-        let rd2 = rd2_q20 + rr * rr;
-        let q1_q10 = if rd2 < rd1 { q2_q10 } else { q1_q10 };
+        debug_assert!((-32..=31).contains(&q1_q0));
+        let row = &rd_table[(q1_q0 + 32) as usize];
+        let q1_q10 = if r_q10 * row[2] - row[3] < 0 { row[1] } else { row[0] };
 
         pulses[i] = rshift_round(q1_q10, 10) as i8;
 
@@ -391,6 +406,9 @@ pub(crate) fn nsq(
     let mut lag = nsq.lag_prev;
     let offset_q10 = i32::from(QUANTIZATION_OFFSETS_Q10[(signal_type >> 1) as usize][quant_offset_type as usize]);
     let lsf_interp_flag = i32::from(nlsf_interp_coef_q2 != 4);
+    // `offset_q10` and `lambda_q10` are constant across the frame, so build the
+    // per-sample RD candidate table once here (not per subframe).
+    let rd_table = build_rd_table(offset_q10, lambda_q10);
 
     // Reuse the scratch buffers (taken out so the sub-functions can borrow
     // `&mut nsq`); clear+resize zero-fills to match the reference's fresh
@@ -467,6 +485,7 @@ pub(crate) fn nsq(
             gains_q16[k],
             lambda_q10,
             offset_q10,
+            &rd_table,
             cfg.subfr_length,
             cfg.shaping_lpc_order,
             cfg.predict_lpc_order,
