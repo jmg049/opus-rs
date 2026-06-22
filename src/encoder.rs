@@ -137,6 +137,10 @@ pub struct OpusEncoder {
     /// speed. Drives the SILK pitch/shaping
     /// settings and the CELT prefilter/tf/spreading gates.
     complexity: u8,
+    /// Variable bitrate (`OPUS_SET_VBR`). When `true` (the default) a set
+    /// bitrate is a VBR target; when `false` the CELT path codes constant
+    /// bitrate - a fixed byte count per frame at the target rate.
+    vbr: bool,
 }
 
 impl OpusEncoder {
@@ -162,6 +166,7 @@ impl OpusEncoder {
             last_toc: 0,
             dtx_noise_floor: 1.0,
             complexity: 10,
+            vbr: true,
         }
     }
 
@@ -214,6 +219,19 @@ impl OpusEncoder {
     #[must_use]
     pub const fn dtx(&self) -> bool {
         self.use_dtx
+    }
+
+    /// Enables or disables variable bitrate (`OPUS_SET_VBR`). With a bitrate
+    /// set, VBR (the default) lets each CELT packet shrink to its per-frame
+    /// target; CBR codes a fixed byte count per frame at that rate.
+    pub const fn set_vbr(&mut self, vbr: bool) {
+        self.vbr = vbr;
+    }
+
+    /// Whether variable bitrate is enabled (`OPUS_GET_VBR`).
+    #[must_use]
+    pub const fn vbr(&self) -> bool {
+        self.vbr
     }
 
     /// Sets the encode complexity 0-10 (`OPUS_SET_COMPLEXITY`), clamped. Higher
@@ -430,7 +448,20 @@ impl OpusEncoder {
         let toc = (config << 3) | (u8::from(self.channels == 2) << 2);
 
         let pcm = self.dc_reject(pcm);
-        let payload = self.celt.encode_frame_bw(&pcm, max_bytes - 1, end);
+        let payload = if let Some(br) = self.target_bitrate
+            && !self.vbr
+        {
+            // CBR: a fixed byte count for this frame at the target rate
+            // (bits = bitrate * samples / 48000; bytes = bits / 8), coded with
+            // the CELT coder in its fill (CBR) mode.
+            let cbr_bytes = ((br as usize * n) / 384_000).clamp(2, max_bytes - 1);
+            self.celt.set_target_bitrate(None);
+            let p = self.celt.encode_frame_bw(&pcm, cbr_bytes, end);
+            self.celt.set_target_bitrate(self.target_bitrate);
+            p
+        } else {
+            self.celt.encode_frame_bw(&pcm, max_bytes - 1, end)
+        };
         self.last_final_range = self.celt.final_range();
         let mut packet = Vec::with_capacity(payload.len() + 1);
         packet.push(toc);
@@ -762,6 +793,41 @@ mod tests {
 
         assert_eq!(got, want, "reset must reproduce the fresh-encoder bytes");
         assert_eq!(reused.final_range(), want_range, "reset must reproduce the final range");
+    }
+
+    /// `set_vbr(false)` codes constant bitrate - every CELT packet is the same
+    /// size, the byte count for the target rate - while VBR varies with content.
+    #[test]
+    fn vbr_off_codes_constant_bitrate() {
+        let frames: Vec<Vec<f32>> = (0..10)
+            .map(|k| {
+                let amp = if k % 3 == 0 { 0.5 } else { 0.1 };
+                (0..960)
+                    .map(|i| amp * (2.0 * core::f32::consts::PI * (200 * (k + 1)) as f32 * i as f32 / 48_000.0).sin())
+                    .collect()
+            })
+            .collect();
+
+        let mut cbr = OpusEncoder::new(1);
+        cbr.set_bitrate(Some(64_000));
+        cbr.set_vbr(false);
+        assert!(!cbr.vbr());
+        let cbr_sizes: Vec<usize> = frames.iter().map(|f| cbr.encode(f, 1275).unwrap().len()).collect();
+        assert!(
+            cbr_sizes.iter().all(|&s| s == cbr_sizes[0]),
+            "CBR packets must be constant size, got {cbr_sizes:?}"
+        );
+        // 64000 bps * 960/48000 s / 8 = 160 payload bytes, + 1 TOC.
+        assert_eq!(cbr_sizes[0], 64_000 * 960 / 384_000 + 1);
+
+        let mut vbr = OpusEncoder::new(1);
+        vbr.set_bitrate(Some(64_000));
+        assert!(vbr.vbr());
+        let vbr_sizes: Vec<usize> = frames.iter().map(|f| vbr.encode(f, 1275).unwrap().len()).collect();
+        assert!(
+            vbr_sizes.iter().any(|&s| s != vbr_sizes[0]),
+            "VBR packets should vary with content, got {vbr_sizes:?}"
+        );
     }
 
     /// The new getters mirror the setters.

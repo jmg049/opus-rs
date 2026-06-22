@@ -45,6 +45,7 @@ pub struct OpusEncoder {
     bitrate: Option<u32>,
     dtx: bool,
     bandwidth: Bandwidth,
+    vbr: bool,
 }
 
 impl OpusEncoder {
@@ -81,6 +82,7 @@ impl OpusEncoder {
             bitrate,
             dtx,
             bandwidth,
+            vbr: true,
         })
     }
 
@@ -127,6 +129,20 @@ impl OpusEncoder {
     fn set_dtx(&mut self, on: bool) {
         self.inner.set_dtx(on);
         self.dtx = on;
+    }
+
+    /// Variable bitrate (``OPUS_SET_VBR``). ``True`` (default) makes a set
+    /// bitrate a VBR target; ``False`` codes constant bitrate (a fixed byte
+    /// count per CELT frame at the target rate).
+    #[getter]
+    fn get_vbr(&self) -> bool {
+        self.vbr
+    }
+
+    #[setter]
+    fn set_vbr(&mut self, vbr: bool) {
+        self.inner.set_vbr(vbr);
+        self.vbr = vbr;
     }
 
     /// Coded audio bandwidth (``OPUS_SET_BANDWIDTH``).
