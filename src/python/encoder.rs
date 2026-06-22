@@ -52,6 +52,8 @@ pub struct OpusEncoder {
     signal: Signal,
     application: Application,
     max_bandwidth: Bandwidth,
+    inband_fec: bool,
+    packet_loss_perc: u8,
 }
 
 impl OpusEncoder {
@@ -81,6 +83,8 @@ impl OpusEncoder {
         signal = Signal::Auto,
         application = Application::Audio,
         max_bandwidth = Bandwidth::FullBand,
+        inband_fec = false,
+        packet_loss_perc = 0,
     ))]
     #[allow(clippy::too_many_arguments, reason = "mirrors the Opus encoder control surface")]
     fn new(
@@ -92,6 +96,8 @@ impl OpusEncoder {
         signal: Signal,
         application: Application,
         max_bandwidth: Bandwidth,
+        inband_fec: bool,
+        packet_loss_perc: u8,
     ) -> PyResult<Self> {
         if channels != 1 && channels != 2 {
             return Err(PyValueError::new_err("channels must be 1 or 2"));
@@ -104,6 +110,8 @@ impl OpusEncoder {
         inner.set_application(application.into());
         inner.set_max_bandwidth(max_bandwidth.into());
         inner.set_bandwidth(bandwidth.into());
+        inner.set_inband_fec(inband_fec);
+        inner.set_packet_loss_perc(packet_loss_perc);
         Ok(Self {
             inner,
             channels,
@@ -117,6 +125,8 @@ impl OpusEncoder {
             signal,
             application,
             max_bandwidth,
+            inband_fec,
+            packet_loss_perc: packet_loss_perc.min(100),
         })
     }
 
@@ -163,6 +173,34 @@ impl OpusEncoder {
     fn set_dtx(&mut self, on: bool) {
         self.inner.set_dtx(on);
         self.dtx = on;
+    }
+
+    /// In-band forward error correction (``OPUS_SET_INBAND_FEC``). When enabled,
+    /// SILK-mode packets carry a redundant LBRR copy of the previous packet's
+    /// frame(s), so a lost packet can be recovered from its successor via
+    /// :meth:`OpusDecoder.decode_fec`.
+    #[getter]
+    fn get_inband_fec(&self) -> bool {
+        self.inband_fec
+    }
+
+    #[setter]
+    fn set_inband_fec(&mut self, on: bool) {
+        self.inner.set_inband_fec(on);
+        self.inband_fec = on;
+    }
+
+    /// Expected packet-loss percentage 0-100 (``OPUS_SET_PACKET_LOSS_PERC``),
+    /// clamped. Biases the encoder toward loss-robust coding.
+    #[getter]
+    fn get_packet_loss_perc(&self) -> u8 {
+        self.packet_loss_perc
+    }
+
+    #[setter]
+    fn set_packet_loss_perc(&mut self, perc: u8) {
+        self.inner.set_packet_loss_perc(perc);
+        self.packet_loss_perc = perc.min(100);
     }
 
     /// Variable bitrate (``OPUS_SET_VBR``). ``True`` (default) makes a set
