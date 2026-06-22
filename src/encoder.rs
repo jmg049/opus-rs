@@ -347,10 +347,7 @@ impl OpusEncoder {
         }
         // Only 2 -> 1 downmix reaches here (coded < configured, both in 1..=2).
         debug_assert_eq!((self.channels, self.coded_channels()), (2, 1));
-        filtered
-            .chunks_exact(2)
-            .map(|lr| (lr[0] + lr[1]) * 0.5)
-            .collect()
+        filtered.chunks_exact(2).map(|lr| (lr[0] + lr[1]) * 0.5).collect()
     }
 
     /// The encode complexity 0-10 (`OPUS_GET_COMPLEXITY`).
@@ -611,10 +608,7 @@ impl OpusEncoder {
         };
         // The chosen bandwidth is the narrowest of: what the signal occupies,
         // what the rate affords, and the caller's hard cap.
-        analysis
-            .detected_bandwidth
-            .min(rate_cap)
-            .min(self.max_bandwidth)
+        analysis.detected_bandwidth.min(rate_cap).min(self.max_bandwidth)
     }
 
     /// Chooses SILK / hybrid / CELT for a 10/20 ms frame, applying the
@@ -654,10 +648,7 @@ impl OpusEncoder {
         // Bandwidth/bitrate backbone, unchanged from the original simplified
         // decision, gives the *speech-side* preference (SILK ≤ WB, hybrid for
         // SWB/FB at modest rates). Strong music evidence pulls toward CELT.
-        let wb_or_below = matches!(
-            bw,
-            Bandwidth::NarrowBand | Bandwidth::MediumBand | Bandwidth::WideBand
-        );
+        let wb_or_below = matches!(bw, Bandwidth::NarrowBand | Bandwidth::MediumBand | Bandwidth::WideBand);
         let swb_or_fb = matches!(bw, Bandwidth::SuperWideBand | Bandwidth::FullBand);
 
         // The speech-side mode the backbone would pick for this bw/bitrate.
@@ -698,6 +689,25 @@ impl OpusEncoder {
                 }
             },
         }
+    }
+
+    /// Whether [`decide_mode`](Self::decide_mode)'s outcome can depend on the
+    /// per-frame music probability, given the current (forced) bandwidth and
+    /// settings. When it cannot - high-rate CELT with no speech hint, or
+    /// restricted low delay - the mode is already pinned, so the analysis can be
+    /// skipped. Mirrors `decide_mode`'s branch structure exactly, so skipping
+    /// when this is false never changes the chosen mode.
+    fn mode_decision_uses_analysis(&self) -> bool {
+        if self.application == Application::RestrictedLowDelay {
+            return false;
+        }
+        let bw = self.bandwidth;
+        let wb_or_below = matches!(bw, Bandwidth::NarrowBand | Bandwidth::MediumBand | Bandwidth::WideBand);
+        let swb_or_fb = matches!(bw, Bandwidth::SuperWideBand | Bandwidth::FullBand);
+        let speech_mode_possible = (wb_or_below && self.target_bitrate.is_some_and(|b| b <= 24_000))
+            || (swb_or_fb && self.target_bitrate.is_some_and(|b| b <= 40_000));
+        let speech_requested = self.signal == Signal::Voice || self.application == Application::Voip;
+        speech_mode_possible || speech_requested
     }
 
     /// Encodes one frame, automatically choosing SILK (speech), hybrid
@@ -741,11 +751,23 @@ impl OpusEncoder {
             }
         }
 
-        // Analyse the frame and, if the bandwidth is automatic, pick one. The
-        // chosen bandwidth is written into `self.bandwidth` for the duration of
-        // this call so the per-mode coders pick it up; a forced bandwidth is
-        // left untouched.
-        let analysis = analyze_frame(pcm, self.channels);
+        // Analyse the frame only when the result is actually used: it drives the
+        // automatic bandwidth choice and the SILK/CELT/hybrid mode decision, both
+        // only on 10/20 ms frames. When the bandwidth is forced and the bitrate/
+        // application already pin the mode (e.g. high-rate CELT), the analysis
+        // output would be discarded, so skip the per-frame pass entirely. The
+        // neutral placeholder reproduces `decide_mode`'s pinned outcome exactly.
+        let need_analysis =
+            matches!(per_ch, 480 | 960) && (!self.bandwidth_forced || self.mode_decision_uses_analysis());
+        let analysis = if need_analysis {
+            analyze_frame(pcm, self.channels)
+        } else {
+            FrameAnalysis {
+                music_probability: self.mode_music_smooth,
+                detected_bandwidth: self.bandwidth,
+                energy: 0.0,
+            }
+        };
         if !self.bandwidth_forced && matches!(per_ch, 480 | 960) {
             self.bandwidth = self.auto_bandwidth(&analysis);
         }
@@ -1538,7 +1560,11 @@ mod tests {
                 let packet = enc.encode_silk(&pcm, 1275).expect("silk encode");
                 let out = dec.decode_packet(&packet).expect("decode");
                 assert_eq!(out.len(), spf);
-                assert_eq!(dec.final_range(), enc.final_range(), "range mismatch spf={spf} frame {f}");
+                assert_eq!(
+                    dec.final_range(),
+                    enc.final_range(),
+                    "range mismatch spf={spf} frame {f}"
+                );
             }
         }
     }
@@ -1573,7 +1599,9 @@ mod tests {
             enc.set_bandwidth(Bandwidth::WideBand);
             enc.set_bitrate(Some(20_000));
             enc.set_inband_fec(fec);
-            (0..6).map(|f| enc.encode_silk(&make(f), 1275).expect("encode")).collect()
+            (0..6)
+                .map(|f| enc.encode_silk(&make(f), 1275).expect("encode"))
+                .collect()
         };
         let off = encode_seq(false);
         let on = encode_seq(true);
@@ -1625,7 +1653,10 @@ mod tests {
                 .fold(0.0f64, f64::max)
         };
         let fec_corr = corr_of(frame);
-        assert!(fec_corr > 0.7, "recovered-frame correlation {fec_corr:.3} too low for FEC");
+        assert!(
+            fec_corr > 0.7,
+            "recovered-frame correlation {fec_corr:.3} too low for FEC"
+        );
 
         // Control: without FEC, recovering the same lost packet falls back to
         // plain concealment. FEC recovery must be at least as good - and here,
@@ -1664,7 +1695,9 @@ mod tests {
             enc.set_bandwidth(Bandwidth::WideBand);
             enc.set_bitrate(Some(24_000));
             enc.set_inband_fec(fec);
-            (0..6).map(|f| enc.encode_silk(&make(f), 1275).expect("encode")).collect()
+            (0..6)
+                .map(|f| enc.encode_silk(&make(f), 1275).expect("encode"))
+                .collect()
         };
         let on = encode_seq(true);
         let off = encode_seq(false);
@@ -1706,7 +1739,6 @@ mod tests {
         );
     }
 
-
     /// With in-band FEC enabled, a *stereo* SILK packet still decodes normally
     /// on the `OpusDecoder` finishing on the encoder's exact range state - the
     /// redundant LBRR data (mid + side) is read-and-discarded by the normal
@@ -1730,8 +1762,7 @@ mod tests {
                     // exercising the mid-only→side LBRR transition.
                     let w = (f as f32 / 16.0).min(1.0);
                     let l = 0.4 * (2.0 * core::f32::consts::PI * 210.0 * t).sin();
-                    let r = (1.0 - w) * l
-                        + w * 0.35 * (2.0 * core::f32::consts::PI * 350.0 * t).sin();
+                    let r = (1.0 - w) * l + w * 0.35 * (2.0 * core::f32::consts::PI * 350.0 * t).sin();
                     pcm.push(l);
                     pcm.push(r);
                 }
@@ -1776,7 +1807,9 @@ mod tests {
             enc.set_bandwidth(Bandwidth::WideBand);
             enc.set_bitrate(Some(40_000));
             enc.set_inband_fec(fec);
-            (0..7).map(|f| enc.encode_silk(&make(f), 1275).expect("encode")).collect()
+            (0..7)
+                .map(|f| enc.encode_silk(&make(f), 1275).expect("encode"))
+                .collect()
         };
         let off = encode_seq(false);
         let on = encode_seq(true);
@@ -1903,7 +1936,9 @@ mod tests {
             // frame and its LBRR copy alongside the CELT high band.
             enc.set_bitrate(Some(64_000));
             enc.set_inband_fec(fec);
-            (0..7).map(|f| enc.encode_hybrid(&make(f), 1275).expect("encode")).collect()
+            (0..7)
+                .map(|f| enc.encode_hybrid(&make(f), 1275).expect("encode"))
+                .collect()
         };
         let on = encode_seq(true);
         let off = encode_seq(false);
@@ -2731,7 +2766,11 @@ mod tests {
                 );
                 let out = dec.decode_packet(&packet).expect("decode");
                 assert_eq!(out.len(), spf);
-                assert_eq!(dec.final_range(), enc.final_range(), "range mismatch spf={spf} frame {f}");
+                assert_eq!(
+                    dec.final_range(),
+                    enc.final_range(),
+                    "range mismatch spf={spf} frame {f}"
+                );
             }
         }
     }
@@ -2744,9 +2783,7 @@ mod tests {
         // CELT TOC configs map to bandwidth: NB 16-19, WB 20-23, SWB 24-27,
         // FB 28-31. SILK config: NB 0-3, MB 4-7, WB 8-11. We check the coded
         // bandwidth (from the TOC) never exceeds the cap.
-        let bw_of = |packet: &[u8]| -> Bandwidth {
-            crate::packet::Toc::new(packet[0]).bandwidth()
-        };
+        let bw_of = |packet: &[u8]| -> Bandwidth { crate::packet::Toc::new(packet[0]).bandwidth() };
         for &cap in &[Bandwidth::NarrowBand, Bandwidth::WideBand, Bandwidth::SuperWideBand] {
             let mut enc = OpusEncoder::new(1);
             enc.set_auto_bandwidth(); // explicit: automatic selection
@@ -2768,13 +2805,14 @@ mod tests {
                     .collect();
                 let packet = enc.encode_auto(&pcm, 1275).expect("encode");
                 let bw = bw_of(&packet);
-                assert!(
-                    bw <= cap,
-                    "coded bandwidth {bw:?} exceeds cap {cap:?} (frame {f})"
-                );
+                assert!(bw <= cap, "coded bandwidth {bw:?} exceeds cap {cap:?} (frame {f})");
                 let out = dec.decode_packet(&packet).expect("decode");
                 assert_eq!(out.len(), 960);
-                assert_eq!(dec.final_range(), enc.final_range(), "range mismatch cap={cap:?} frame {f}");
+                assert_eq!(
+                    dec.final_range(),
+                    enc.final_range(),
+                    "range mismatch cap={cap:?} frame {f}"
+                );
             }
         }
     }
@@ -2937,7 +2975,9 @@ mod tests {
             enc.set_bitrate(Some(20_000));
             enc.set_inband_fec(fec);
             enc.set_packet_loss_perc(perc);
-            let packets: Vec<Vec<u8>> = (0..6).map(|f| enc.encode_silk(&make(f), 1275).expect("encode")).collect();
+            let packets: Vec<Vec<u8>> = (0..6)
+                .map(|f| enc.encode_silk(&make(f), 1275).expect("encode"))
+                .collect();
             // Re-encode to collect the per-packet final ranges for the oracle.
             let mut e2 = OpusEncoder::new(1);
             e2.set_bandwidth(Bandwidth::WideBand);
@@ -2960,7 +3000,11 @@ mod tests {
         for (f, p) in on.iter().enumerate() {
             let out = dec_norm.decode_packet(p).expect("normal decode");
             assert_eq!(out.len(), spf);
-            assert_eq!(dec_norm.final_range(), ranges[f], "FEC normal-decode range mismatch {f}");
+            assert_eq!(
+                dec_norm.final_range(),
+                ranges[f],
+                "FEC normal-decode range mismatch {f}"
+            );
         }
 
         let recover = |packets: &[Vec<u8>]| -> Vec<f32> {
@@ -2997,4 +3041,3 @@ mod tests {
         );
     }
 }
-
