@@ -64,5 +64,8 @@ pub mod silk;
 #[cfg(feature = "std")]
 mod simd;
 
+#[cfg(feature = "python")]
+mod python;
+
 pub use packet::{Bandwidth, FrameSize, Mode, Packet, PacketError, Toc};
 pub use range::{RangeDecoder, RangeEncoder, RangeEncoderError};

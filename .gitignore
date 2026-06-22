@@ -1,3 +1,11 @@
 /target
 Cargo.lock
 /tests/vectors/
+
+# Python build / test artifacts
+/dist/
+/docs/python/_build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/

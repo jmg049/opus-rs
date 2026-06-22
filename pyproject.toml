@@ -1,0 +1,53 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "opus_native"
+description = "A pure-Rust implementation of the Opus audio codec (RFC 6716) - fast, dependency-free, with first-class NumPy interop."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Jack Geraghty (jmg049)", email = "jgeraghty049@gmail.com" }]
+maintainers = [{ name = "Jack Geraghty (jmg049)", email = "jgeraghty049@gmail.com" }]
+requires-python = ">=3.9"
+keywords = ["opus", "audio", "codec", "rfc6716", "rust", "numpy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Sound/Audio :: Conversion",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+dependencies = ["numpy>=1.22"]
+
+[project.urls]
+"Homepage" = "https://github.com/jmg049/opus_native"
+"Repository" = "https://github.com/jmg049/opus_native"
+"Documentation" = "https://docs.rs/opus_native"
+"Bug Reports" = "https://github.com/jmg049/opus_native/issues"
+
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7.0.0",
+    "sphinx-rtd-theme>=2.0.0",
+    "myst-parser>=2.0.0",
+]
+test = ["pytest>=7.4.0", "numpy>=1.22"]
+
+[tool.maturin]
+# Build the extension with the `python` feature on top of the crate defaults;
+# `extension-module` and `abi3-py39` ride along via that feature (see Cargo.toml).
+features = ["python"]
+module-name = "opus_native"
