@@ -46,8 +46,8 @@ impl core::fmt::Display for EncodeError {
 #[cfg(feature = "std")]
 impl std::error::Error for EncodeError {}
 
-/// The SILK low-band target bitrate for a hybrid packet at total `rate` bps
-/// (`compute_silk_rate_for_hybrid`): the reference's per-channel rate table
+/// The SILK low-band target bitrate for a hybrid packet at total `rate` bps:
+/// a per-channel rate table
 /// (no-FEC column - 10 ms and 20 ms coincide there), interpolated, with the
 /// +300 bps super-wideband nudge. CELT codes the rest.
 fn compute_silk_rate_for_hybrid(rate: i32, swb: bool, channels: i32) -> i32 {
@@ -134,7 +134,7 @@ pub struct OpusEncoder {
     /// activity detector, so pauses are detected relative to the ambient level.
     dtx_noise_floor: f32,
     /// Encode complexity 0-10 (`OPUS_SET_COMPLEXITY`); trades analysis depth for
-    /// speed, mirroring libopus's mapping. Drives the SILK pitch/shaping
+    /// speed. Drives the SILK pitch/shaping
     /// settings and the CELT prefilter/tf/spreading gates.
     complexity: u8,
 }
@@ -165,10 +165,60 @@ impl OpusEncoder {
         }
     }
 
+    /// Resets the encoder to its freshly-created state (`OPUS_RESET_STATE`),
+    /// keeping the configured channels, bandwidth, bitrate and complexity but
+    /// dropping all cross-frame history (the SILK/CELT state, the high-pass
+    /// filter memory, the DTX activity run and the range oracle), so the next
+    /// packet is coded as if it were the first.
+    pub fn reset(&mut self) {
+        self.celt = CeltEncoder::with_channels(self.channels);
+        self.celt.set_complexity(self.complexity);
+        self.celt.set_target_bitrate(self.target_bitrate);
+        self.silk = None;
+        self.silk_stereo = None;
+        self.last_final_range = 0;
+        self.hp_mem = [0.0; 2];
+        // `use_dtx`, `channels`, `bandwidth`, `target_bitrate`, `complexity`
+        // are configuration and are preserved across a reset.
+        self.dtx_no_activity_q1 = 0;
+        self.last_toc = 0;
+        self.dtx_noise_floor = 1.0;
+    }
+
+    /// The configured number of channels (1 or 2).
+    #[must_use]
+    pub const fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// The encode complexity 0-10 (`OPUS_GET_COMPLEXITY`).
+    #[must_use]
+    pub const fn complexity(&self) -> u8 {
+        self.complexity
+    }
+
+    /// The target bitrate in bits/s, or `None` for the per-mode default
+    /// (`OPUS_GET_BITRATE`).
+    #[must_use]
+    pub const fn bitrate(&self) -> Option<u32> {
+        self.target_bitrate
+    }
+
+    /// The coded audio bandwidth (`OPUS_GET_BANDWIDTH`).
+    #[must_use]
+    pub const fn bandwidth(&self) -> Bandwidth {
+        self.bandwidth
+    }
+
+    /// Whether discontinuous transmission is enabled (`OPUS_GET_DTX`).
+    #[must_use]
+    pub const fn dtx(&self) -> bool {
+        self.use_dtx
+    }
+
     /// Sets the encode complexity 0-10 (`OPUS_SET_COMPLEXITY`), clamped. Higher
-    /// is better quality and slower; the default is 5, matching libopus. This
-    /// is what makes a like-for-like speed comparison possible: at complexity 0
-    /// the encoder skips the same analysis libopus skips at complexity 0 (the
+    /// is better quality and slower; the default is 5. At complexity 0
+    /// the encoder skips the deepest analysis (the
     /// CELT pre-filter pitch search, tf analysis, spreading; the deepest SILK
     /// pitch search).
     pub const fn set_complexity(&mut self, complexity: u8) {
@@ -232,7 +282,7 @@ impl OpusEncoder {
         false
     }
 
-    /// libopus `dc_reject`: a 3 Hz one-pole high-pass on the interleaved
+    /// A 3 Hz one-pole high-pass on the interleaved
     /// 48 kHz input, run before every encode to strip DC and sub-audible
     /// rumble. The per-channel state (`hp_mem`) persists across frames.
     fn dc_reject(&mut self, pcm: &[f32]) -> Vec<f32> {
@@ -273,8 +323,8 @@ impl OpusEncoder {
     }
 
     /// Encodes one frame, automatically choosing SILK (speech / lower rate)
-    /// or CELT (music / higher rate). This is a simplified mode decision (not
-    /// libopus's full hysteresis): the SILK-only frame sizes 40/60 ms always
+    /// or CELT (music / higher rate). This is a simplified mode decision
+    /// (no full hysteresis): the SILK-only frame sizes 40/60 ms always
     /// use SILK, the CELT-only sizes 2.5/5 ms always use CELT, and 10/20 ms
     /// pick SILK (wideband-or-below) or hybrid (super-wideband/fullband) at a
     /// modest target bitrate, otherwise CELT. `pcm` is interleaved 48 kHz f32;
@@ -532,7 +582,7 @@ impl OpusEncoder {
 
         let nb_subfr = if frame_ms == 10 { 2 } else { 4 };
         // Total packet budget from the target bitrate, the SILK low-band rate
-        // (libopus's hybrid SILK/CELT split table), and the byte share SILK may
+        // (the hybrid SILK/CELT split table), and the byte share SILK may
         // use so the CELT high band always has room (`celt_floor`, scaled by
         // the number of high bands it codes).
         let target = self.target_bitrate.map_or(32_000, |b| b as i32);
@@ -629,7 +679,7 @@ impl OpusEncoder {
 /// `pre_skip` matches the reconstruction delay of the mode fullband
 /// `encode_auto` selects for `bitrate` - 120 samples for CELT (> 40 kb/s),
 /// 69 for hybrid (≤ 40 kb/s) - so the decoder trims the warm-up and the output
-/// aligns with the input (verified at zero lag against ffmpeg/libopus).
+/// aligns with the input (verified at zero lag).
 ///
 /// # Panics
 ///
@@ -682,6 +732,52 @@ mod tests {
     use super::*;
     use crate::{OpusDecoder, decode_ogg_opus};
     use alloc::vec::Vec;
+
+    /// `reset` drops all cross-frame state: a fresh encoder and a
+    /// reset-after-use encoder must code the same frame to identical bytes and
+    /// the same final range (`OPUS_RESET_STATE` semantics).
+    #[test]
+    fn reset_restores_first_packet_state() {
+        let frame: Vec<f32> = (0..960)
+            .map(|i| 0.3 * (2.0 * core::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin())
+            .collect();
+
+        let mut fresh = OpusEncoder::new(1);
+        fresh.set_bitrate(Some(64_000));
+        let want = fresh.encode_auto(&frame, 1275).unwrap();
+        let want_range = fresh.final_range();
+
+        let mut reused = OpusEncoder::new(1);
+        reused.set_bitrate(Some(64_000));
+        // Drive it through several different frames so it accumulates state...
+        for k in 1..6 {
+            let other: Vec<f32> = (0..960)
+                .map(|i| 0.2 * (2.0 * core::f32::consts::PI * (200 * k) as f32 * i as f32 / 48_000.0).sin())
+                .collect();
+            let _ = reused.encode_auto(&other, 1275).unwrap();
+        }
+        // ...then reset and re-encode the original frame.
+        reused.reset();
+        let got = reused.encode_auto(&frame, 1275).unwrap();
+
+        assert_eq!(got, want, "reset must reproduce the fresh-encoder bytes");
+        assert_eq!(reused.final_range(), want_range, "reset must reproduce the final range");
+    }
+
+    /// The new getters mirror the setters.
+    #[test]
+    fn config_getters_mirror_setters() {
+        let mut enc = OpusEncoder::new(2);
+        enc.set_complexity(7);
+        enc.set_bitrate(Some(48_000));
+        enc.set_bandwidth(Bandwidth::WideBand);
+        enc.set_dtx(true);
+        assert_eq!(enc.channels(), 2);
+        assert_eq!(enc.complexity(), 7);
+        assert_eq!(enc.bitrate(), Some(48_000));
+        assert_eq!(enc.bandwidth(), Bandwidth::WideBand);
+        assert!(enc.dtx());
+    }
 
     /// With DTX enabled, a stretch of silence after speech produces 1-byte
     /// TOC-only packets (after the 200 ms activity hangover), the decoder

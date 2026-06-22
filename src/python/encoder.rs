@@ -149,6 +149,15 @@ impl OpusEncoder {
         self.inner.final_range()
     }
 
+    /// Reset the encoder to its freshly-created state (``OPUS_RESET_STATE``).
+    ///
+    /// Keeps the configuration (channels, complexity, bitrate, bandwidth, DTX)
+    /// but drops all cross-frame history, so the next packet is coded as if it
+    /// were the first.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
     /// Encode one frame, automatically choosing SILK, hybrid, or CELT.
     ///
     /// A simplified mode decision based on frame size, bandwidth, and target
