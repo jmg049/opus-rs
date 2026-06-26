@@ -1,0 +1,116 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustfmt.toml uses nightly-only options, so format checking needs nightly.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo +nightly fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The vs_libopus bench (an --all-targets target) links libopus via FFI.
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config cmake
+      - name: clippy (default features)
+        run: cargo clippy --all-targets --features std -- -D warnings
+      - name: clippy (zero-dependency build)
+        run: cargo clippy --lib --tests --no-default-features --features std -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test (default features)
+        run: cargo test --features std
+      - name: test (zero-dependency build)
+        run: cargo test --no-default-features --features std
+
+  no-std:
+    name: no_std (rlib) builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      # A bare-metal target with no std proves the core crate is no_std + alloc
+      # clean (the cdylib/Python path needs std and is not built here).
+      - run: cargo build -p opus_native --no-default-features --target thumbv7em-none-eabihf
+
+  conformance:
+    name: conformance vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cache official test vectors (~121 MB, RFC 8251 set)
+        id: vectors
+        uses: actions/cache@v4
+        with:
+          path: tests/vectors
+          key: opus-testvectors-rfc8251
+      - name: fetch test vectors
+        if: steps.vectors.outputs.cache-hit != 'true'
+        run: sh tools/fetch-testvectors.sh
+      - name: conformance (including the slow opus_compare quality metric)
+        run: cargo test --release --features std --test conformance -- --include-ignored
+
+  miri:
+    name: miri (unsafe SIMD kernels)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: tools/miri.sh
+
+  bench:
+    name: perf vs libopus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config cmake
+      # Shared CI runners are noisy and not core-pinned, so the absolute ratios
+      # are not a hard gate; the table is printed on every run so a reviewer can
+      # spot a large regression (e.g. the kind a per-frame analysis pass caused).
+      - run: cargo bench --bench vs_libopus --features std
+
+  python:
+    name: python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      # uv builds the extension (maturin backend) as part of the sync.
+      - run: uv run --project . --extra test python -m pytest tests/python -q

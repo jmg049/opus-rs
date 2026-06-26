@@ -3,11 +3,11 @@
 //! redundancy, and mode-transition smoothing.
 //!
 //! Output is 48 kHz interleaved f32 (the float build's native form);
-//! [`OpusDecoder::decode_packet_i16`] converts to s16. Packet-loss
-//! concealment is not yet implemented: mode transitions that are normally
-//! smoothed with a 5 ms concealment frame fade from silence
-//! instead, which only affects 2.5 ms of audio at rare mode switches and
-//! never the entropy stream.
+//! [`OpusDecoder::decode_packet_i16`] converts to s16. Packet-loss concealment
+//! is implemented for SILK, CELT and hybrid (see [`OpusDecoder::decode_lost`]);
+//! the one part still missing is the brief inter-mode concealment cross-fade, so
+//! a SILK/CELT mode switch across a lost packet fades from silence over 2.5 ms
+//! at the boundary, which never affects the entropy stream.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -163,10 +163,9 @@ impl OpusDecoder {
     }
 
     /// Conceals one lost packet of `frame_size` samples per channel
-    /// (10-60 ms). CELT concealment extrapolates
-    /// the last pitch period; SILK concealment is not yet implemented, so
-    /// frames following SILK or hybrid packets fade to silence. The final
-    /// range of a concealed packet is 0.
+    /// (10-60 ms). CELT concealment extrapolates the last pitch period; SILK and
+    /// hybrid concealment extrapolate the previous frame's LTP/LPC model over a
+    /// decaying excitation. The final range of a concealed packet is 0.
     ///
     /// # Panics
     ///

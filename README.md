@@ -5,8 +5,8 @@ A pure-Rust implementation of the [Opus audio codec](https://opus-codec.org/)
 no C and no FFI.
 
 **Pure Rust. `unsafe` only in a few SIMD kernels, every one checked under
-[Miri](https://github.com/rust-lang/miri). Builds anywhere Rust does, including
-`wasm32` and `no_std`.**
+[Miri](https://github.com/rust-lang/miri). Runs on stable Rust, including
+`wasm32`.**
 
 > Pre-release: the API is not yet stable (0.x). The decoder passes the official
 > Opus conformance vectors, and the encoder produces standard Opus that libopus
@@ -16,10 +16,11 @@ no C and no FFI.
 
 `opus_native` is a from-scratch Rust implementation of Opus. It links no
 `libopus`, needs no C toolchain, and exposes plain `&[u8]`/`&[i16]`/`&[f32]`
-interfaces, so it embeds under any audio stack and compiles to every target Rust
-supports.
+interfaces, so it embeds under any audio stack.
 
-- Pure Rust, no FFI. Compiles to `wasm32` and to `no_std` (with `alloc`).
+- Pure Rust, no FFI. Builds on `wasm32`. The core (range coder and packet layer)
+  is `no_std` + `alloc`; the full decoder/encoder currently needs `std` for
+  floating-point math.
 - `unsafe` is denied by default. The only exceptions are a few `std::arch` SIMD
   hot loops, each carrying a `// SAFETY:` note ([`docs/unsafe.md`](docs/unsafe.md))
   and checked for undefined behaviour by Miri on both the SSE2 and AVX2 paths

@@ -127,11 +127,9 @@ impl SilkChannelDecoder {
     }
 
     /// Normal decode path: side information, excitation, parameters,
-    /// synthesis, and history update for one frame.
-    ///
-    /// Packet-loss concealment and comfort-noise state updates are not yet
-    /// implemented; they only affect output after lost packets, never a
-    /// loss-free decode.
+    /// synthesis, and history update for one frame. Also captures the
+    /// packet-loss-concealment and comfort-noise model from the decoded frame so
+    /// a following lost packet can be concealed.
     pub fn decode_frame(
         &mut self,
         dec: &mut RangeDecoder,
