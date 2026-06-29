@@ -89,10 +89,10 @@ mod accel {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    use spectrograms::{C2cPlanF32, Complex, RealFftC2cPlanF32};
+    use spectrograms::{C2cPlan, Complex, RealFftC2cPlan};
 
     std::thread_local! {
-        static PLANS: RefCell<HashMap<usize, RealFftC2cPlanF32>> = RefCell::new(HashMap::new());
+        static PLANS: RefCell<HashMap<usize, RealFftC2cPlan<f32>>> = RefCell::new(HashMap::new());
     }
 
     std::thread_local! {
@@ -112,11 +112,11 @@ mod accel {
                 let mut plans = plans.borrow_mut();
                 let plan = plans
                     .entry(buf.len())
-                    .or_insert_with(|| RealFftC2cPlanF32::new(buf.len()));
+                    .or_insert_with(|| RealFftC2cPlan::<f32>::new(buf.len()));
                 if inverse {
-                    plan.inverse(&mut buf).expect("plan sized to buffer");
+                    plan.inverse(&mut buf[..]).expect("plan sized to buffer");
                 } else {
-                    plan.forward(&mut buf).expect("plan sized to buffer");
+                    plan.forward(&mut buf[..]).expect("plan sized to buffer");
                 }
             });
             for (out, c) in output.iter_mut().zip(buf.iter()) {
